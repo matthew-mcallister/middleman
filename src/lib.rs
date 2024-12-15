@@ -28,7 +28,7 @@ impl Middleman {
         let db = rocksdb::OptimisticTransactionDB::open(&options, &config.db_dir)?;
         let db = Arc::new(db);
 
-        let events = Arc::new(EventTable::new());
+        let events = Arc::new(EventTable::new(Arc::clone(&db)));
 
         Ok(Self { db, events })
     }
@@ -37,10 +37,11 @@ impl Middleman {
         let txn = self.db.transaction();
 
         // Construct idempotency key and check for existing record
-        // XXX: Maybe do this when calling EventBuilder.build...?
-        if let Some(data) = txn.get(&event.idempotency_lookup_key())? {
-            let bytes: [u8; 8] = data[..].try_into().unwrap();
-            return Ok(u64::from_ne_bytes(bytes));
+        if let Some(id) = self
+            .events
+            .get_id_by_idempotency_key(event.tag(), event.idempotency_key())?
+        {
+            return Ok(id);
         }
 
         let id = self.events.create(&txn, event)?;

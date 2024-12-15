@@ -1,12 +1,13 @@
 use regex::Regex;
 use url::Url;
+use uuid::Uuid;
 
 use crate::delivery::Delivery;
 use crate::error::DynResult;
 use crate::event::Event;
-use crate::types::{DbTransaction, Prefix, Tag};
-use crate::util::ByteCast;
-use crate::{impl_byte_cast_unsized, make_dst, make_key};
+use crate::types::{DbTransaction, Prefix};
+use crate::util::{with_types, ByteCast};
+use crate::{define_key, impl_byte_cast_unsized, make_dst};
 
 /// Subscriber that receives events.
 ///
@@ -20,7 +21,7 @@ use crate::{impl_byte_cast_unsized, make_dst, make_key};
 #[derive(Debug)]
 #[repr(C)]
 pub struct SubscriberT<T: ?Sized> {
-    tag: Tag,
+    tag: Uuid,
     _flags: u32,
     _reserved: u32,
     // Allows adding extensions in the future
@@ -32,7 +33,22 @@ impl_byte_cast_unsized!(SubscriberT, content);
 
 pub type Subscriber = SubscriberT<[u8]>;
 
+define_key!(SubscriberKey {
+    prefix = Prefix::Subscriber,
+    tag: Uuid,
+    id: Uuid,
+});
+
+define_key!(SubscriberPrefix {
+    prefix = Prefix::Subscriber,
+    tag: Uuid,
+});
+
 impl Subscriber {
+    pub fn tag(&self) -> Uuid {
+        self.tag
+    }
+
     pub fn destination_url(&self) -> &str {
         let bytes = &self.content[..self.offsets[0] as _];
         unsafe { std::str::from_utf8_unchecked(bytes) }
@@ -47,24 +63,23 @@ impl Subscriber {
     /// Iterates over all subscribers of the given stream.
     pub fn iter_stream_subscribers<'a>(
         txn: &'a DbTransaction,
-        tag: Tag,
+        tag: Uuid,
         stream: &'a str,
-    ) -> impl Iterator<Item = Result<(u128, Box<Self>), rocksdb::Error>> + 'a {
-        let prefix = make_key!(u8: Prefix::Subscriber as u8, u128: tag);
-        txn.prefix_iterator(&prefix).filter_map(|item| {
-            let (key, bytes) = match item {
+    ) -> impl Iterator<Item = Result<(Uuid, Box<Self>), rocksdb::Error>> + 'a {
+        let prefix = SubscriberPrefix::new(tag);
+        let iter = unsafe { with_types::<SubscriberKey, Subscriber>(txn.prefix_iterator(prefix)) };
+        iter.filter_map(|item| {
+            let (key, subscriber) = match item {
                 Ok(x) => x,
                 Err(e) => return Some(Err(e)),
             };
-            let subscriber: Box<Subscriber> = unsafe { ByteCast::from_bytes_owned(&*bytes) };
 
             let regex = Regex::new(subscriber.stream_regex()).unwrap();
             if !regex.is_match(stream) {
                 return None;
             }
 
-            let key = u128::from_ne_bytes(<[u8; 16]>::try_from(&key[17..]).unwrap());
-            Some(Ok((key, subscriber)))
+            Some(Ok((key.id, subscriber)))
         })
     }
 
@@ -84,7 +99,7 @@ impl Subscriber {
 
 #[derive(Debug, Default)]
 pub struct SubscriberBuilder {
-    tag: u128,
+    tag: Uuid,
     destination_url: Option<Url>,
     stream_regex: Option<Regex>,
 }
@@ -94,7 +109,7 @@ impl SubscriberBuilder {
         Default::default()
     }
 
-    pub fn tag(&mut self, tag: u128) -> &mut Self {
+    pub fn tag(&mut self, tag: Uuid) -> &mut Self {
         self.tag = tag;
         self
     }
@@ -141,27 +156,21 @@ mod tests {
     use regex::Regex;
     use url::Url;
 
-    use crate::subscriber::SubscriberT;
-    use crate::util::ByteCast;
-
     use super::SubscriberBuilder;
 
     #[test]
     fn test_build_subscriber() {
         let url = "https://example.com/webhook";
         let regex = "^hello";
+        let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let subscriber = SubscriberBuilder::new()
-            .tag(1)
+            .tag(tag)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new(regex).unwrap())
             .build()
             .unwrap();
+        assert_eq!(subscriber.tag(), tag);
         assert_eq!(subscriber.stream_regex(), regex);
         assert_eq!(subscriber.destination_url(), url);
-        let bytes = unsafe { ByteCast::as_bytes(&*subscriber) };
-        assert_eq!(
-            bytes.len(),
-            std::mem::size_of::<SubscriberT<()>>() + regex.len() + url.len()
-        );
     }
 }

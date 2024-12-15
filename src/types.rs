@@ -1,5 +1,6 @@
 /// Binary key prefix.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum Prefix {
     Event = 0,
     EventIdempotencyKeyIndex = 1,
@@ -8,10 +9,5 @@ pub enum Prefix {
     Subscriber = 4,
 }
 
+pub(crate) type Db = rocksdb::OptimisticTransactionDB;
 pub(crate) type DbTransaction<'db> = rocksdb::Transaction<'db, rocksdb::OptimisticTransactionDB>;
-
-// XXX: Enforce that both of these are valid UUIDs. This way, we are
-// guaranteed to be able to format them as UUIDs later. Version 8 UUIDs
-// are totally allowed if the application wants to use e.g. int IDs.
-pub type Tag = u128;
-pub type IdempotencyKey = u128;

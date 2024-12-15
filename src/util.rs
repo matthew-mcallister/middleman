@@ -1,22 +1,90 @@
-/// Constructs a [u8; N] array from arbitrary inputs. Integers are
-/// written in big-endian order.
-#[macro_export]
-macro_rules! make_key {
-    ($($ty:ty: $val:expr),*$(,)?) => {{
-        use std::mem::MaybeUninit;
-        const SIZE: usize = 0 $(+ std::mem::size_of::<$ty>())*;
-        let mut buf: MaybeUninit<[u8; SIZE]> = MaybeUninit::uninit();
-        let mut _ptr = &mut buf as *mut MaybeUninit<[u8; SIZE]> as *mut u8;
-        $(
-            let val: $ty = $val;
-            let data = val.to_be_bytes();
-            unsafe {
-                _ptr.copy_from(data.as_ptr(), data.len());
-                _ptr = _ptr.offset(data.len() as _);
+pub(crate) fn join_slices<T: Copy>(slices: &[&[T]]) -> Vec<T> {
+    let len = slices.iter().map(|slice| slice.len()).sum();
+    let mut vec = Vec::with_capacity(len);
+    for &slice in slices {
+        vec.extend(slice);
+    }
+    vec
+}
+
+macro_rules! big_endian_int {
+    ($BeInt:ident, $Int:ty) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct $BeInt([u8; std::mem::size_of::<$Int>()]);
+        impl From<$Int> for $BeInt {
+            fn from(value: $Int) -> $BeInt {
+                $BeInt(value.to_be_bytes())
             }
-        )*
-        unsafe { buf.assume_init() }
-    }};
+        }
+        impl From<$BeInt> for [u8; std::mem::size_of::<$Int>()] {
+            fn from(value: $BeInt) -> [u8; std::mem::size_of::<$Int>()] {
+                value.0
+            }
+        }
+        impl From<[u8; std::mem::size_of::<$Int>()]> for $BeInt {
+            fn from(value: [u8; std::mem::size_of::<$Int>()]) -> $BeInt {
+                $BeInt(value)
+            }
+        }
+        impl AsRef<[u8; std::mem::size_of::<$Int>()]> for $BeInt {
+            fn as_ref(&self) -> &[u8; std::mem::size_of::<$Int>()] {
+                &self.0
+            }
+        }
+    };
+}
+
+big_endian_int!(BigEndianU16, u16);
+big_endian_int!(BigEndianU32, u32);
+big_endian_int!(BigEndianU64, u64);
+
+#[macro_export]
+macro_rules! define_key {
+    (
+        $Key:ident {
+            prefix = $prefix_value:expr,
+            $($field:ident: $FieldTy:ty),*$(,)?
+        }
+    ) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[repr(packed)]
+        pub(crate) struct $Key {
+            prefix: crate::types::Prefix,
+            $(pub(crate) $field: $FieldTy,)*
+        }
+
+        impl $Key {
+            pub(crate) fn new($($field: $FieldTy,)*) -> Self {
+                Self { prefix: $prefix_value, $($field,)* }
+            }
+
+            pub(crate) fn as_bytes(&self) -> &[u8; std::mem::size_of::<Self>()] {
+                unsafe { &*(self as *const Self as *const [u8; std::mem::size_of::<Self>()]) }
+            }
+
+            pub(crate) unsafe fn from_bytes(bytes: [u8; std::mem::size_of::<Self>()]) -> Self {
+                unsafe { std::mem::transmute(bytes) }
+            }
+        }
+
+        impl AsRef<[u8; std::mem::size_of::<$Key>()]> for $Key {
+            fn as_ref(&self) -> &[u8; std::mem::size_of::<$Key>()] {
+                self.as_bytes()
+            }
+        }
+
+        impl AsRef<[u8]> for $Key {
+            fn as_ref(&self) -> &[u8] {
+                self.as_bytes().as_ref()
+            }
+        }
+
+        impl From<$Key> for [u8; std::mem::size_of::<$Key>()] {
+            fn from(value: $Key) -> Self {
+                unsafe { std::mem::transmute(value) }
+            }
+        }
+    };
 }
 
 pub(crate) trait ByteCast {
@@ -188,13 +256,44 @@ impl<'db, T: ByteCast + ?Sized> std::ops::Deref for DbSlice<'db, T> {
     }
 }
 
+pub(crate) unsafe fn with_types<K, V>(
+    iter: impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
+) -> impl Iterator<Item = Result<(Box<K>, Box<V>), rocksdb::Error>>
+where
+    K: ByteCast + ?Sized,
+    V: ByteCast + ?Sized,
+{
+    iter.map(|item| {
+        let (k, v) = item?;
+        unsafe { Ok((ByteCast::from_bytes_owned(k), ByteCast::from_bytes_owned(v))) }
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::util::ByteCast;
+    use crate::define_key;
+    use crate::types::Prefix;
+    use crate::util::{BigEndianU32, ByteCast};
 
     #[test]
-    fn test_make_key() {
-        assert_eq!(make_key!(u8: 1, u32: 2, u8: 3), [1, 0, 0, 0, 2, 3]);
+    fn test_big_endian() {
+        assert_eq!(
+            <[u8; 4]>::from(BigEndianU32::from(0x01020304)),
+            [1, 2, 3, 4],
+        );
+    }
+
+    #[test]
+    fn test_define_key() {
+        define_key!(Key {
+            prefix = Prefix::Event,
+            b: u32,
+            c: u8,
+        });
+        let key = Key::new(1, 2);
+        let bytes = [0, 1, 0, 0, 0, 2];
+        assert_eq!(key.as_bytes(), &bytes);
+        assert_eq!(<[u8; 6]>::from(key), bytes);
     }
 
     #[test]

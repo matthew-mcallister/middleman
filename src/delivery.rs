@@ -1,37 +1,96 @@
-use chrono::{NaiveDateTime, Utc};
+use chrono::{Datelike, Timelike, Utc};
+use uuid::Uuid;
 
+use crate::define_key;
 use crate::error::DynResult;
-use crate::make_key;
-use crate::types::{DbTransaction, Prefix};
+use crate::types::{Db, DbTransaction, Prefix};
 use crate::util::ByteCast;
 
+// UTC datetime with stable binary representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct DateTime {
+    yof: i32,
+    seconds: u32,
+    nanos: u32,
+}
+
+impl From<DateTime> for chrono::NaiveDateTime {
+    fn from(value: DateTime) -> Self {
+        let year = value.yof >> 9;
+        let day = (value.yof & 0x1ff) as u32;
+        let date = chrono::NaiveDate::from_yo_opt(year, day).unwrap();
+        let time =
+            chrono::NaiveTime::from_num_seconds_from_midnight_opt(value.seconds, value.nanos)
+                .unwrap();
+        chrono::NaiveDateTime::new(date, time)
+    }
+}
+
+impl From<DateTime> for chrono::DateTime<chrono::Utc> {
+    fn from(value: DateTime) -> Self {
+        let naive: chrono::NaiveDateTime = value.into();
+        chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc)
+    }
+}
+
+impl From<chrono::DateTime<chrono::Utc>> for DateTime {
+    fn from(value: chrono::DateTime<chrono::Utc>) -> Self {
+        let year = value.year();
+        let day = value.day();
+        let yof = year << 9 | (day as i32);
+        let seconds = value.num_seconds_from_midnight();
+        let nanos = value.nanosecond();
+        DateTime {
+            yof,
+            seconds,
+            nanos,
+        }
+    }
+}
+
 /// Delivery of a single event.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Delivery {
-    subscriber_id: u128,
+    subscriber_id: Uuid,
     event_id: u64,
-    next_attempt: NaiveDateTime,
+    next_attempt: DateTime,
     attempts_made: u32,
 }
+
+define_key!(DeliveryKey {
+    prefix = Prefix::Delivery,
+    subscriber_id: Uuid,
+    event_id: u64,
+});
 
 impl Delivery {
     pub(crate) fn create(
         txn: &DbTransaction,
-        subscriber_id: u128,
+        subscriber_id: Uuid,
         event_id: u64,
     ) -> DynResult<Self> {
         let delivery = Delivery {
             subscriber_id,
             event_id,
             attempts_made: 0,
-            next_attempt: Utc::now().naive_utc(),
+            next_attempt: Utc::now().into(),
         };
 
-        let key = make_key!(u8: Prefix::Delivery as u8, u128: subscriber_id, u64: event_id);
-        txn.put(key, delivery.as_bytes())?;
+        let key = DeliveryKey::new(subscriber_id, event_id);
+        txn.put(key, &delivery)?;
 
         Ok(delivery)
+    }
+
+    pub(crate) fn get(db: &Db, subscriber_id: Uuid, event_id: u64) -> DynResult<Option<Box<Self>>> {
+        let key = DeliveryKey::new(subscriber_id, event_id);
+        let bytes = match db.get(key)? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
+        };
+        unsafe { Ok(Some(ByteCast::from_bytes_owned(bytes))) }
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
@@ -39,12 +98,15 @@ impl Delivery {
     }
 }
 
+impl AsRef<[u8]> for Delivery {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::make_key;
     use crate::testing::TestHarness;
-    use crate::types::Prefix;
-    use crate::util::ByteCast;
 
     use super::Delivery;
 
@@ -53,17 +115,15 @@ mod tests {
         let mut harness = TestHarness::new();
         let db = harness.db();
 
-        let subscriber_id: u128 = 1;
-        let event_id: u64 = 2;
+        let subscriber_id = uuid::uuid!("00000000-0000-8000-8000-000000000000");
+        let event_id: u64 = 1;
         let txn = db.transaction();
         let delivery = Delivery::create(&txn, subscriber_id, event_id).unwrap();
         txn.commit().unwrap();
 
-        let key = make_key!(u8: Prefix::Delivery as u8, u128: subscriber_id, u64: event_id);
-        let bytes = db.get(&key).unwrap().unwrap();
-        assert_eq!(delivery.as_bytes(), bytes);
-
-        let delivery2: Box<Delivery> = unsafe { ByteCast::from_bytes_owned(bytes) };
+        let delivery2 = Delivery::get(&db, subscriber_id, event_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(delivery, *delivery2);
     }
 }
