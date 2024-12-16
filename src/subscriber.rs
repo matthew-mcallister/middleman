@@ -6,7 +6,7 @@ use crate::delivery::Delivery;
 use crate::error::DynResult;
 use crate::event::Event;
 use crate::types::{DbTransaction, Prefix};
-use crate::util::{with_types, ByteCast};
+use crate::util::ByteCast;
 use crate::{define_key, impl_byte_cast_unsized, make_dst};
 
 /// Subscriber that receives events.
@@ -18,7 +18,7 @@ use crate::{define_key, impl_byte_cast_unsized, make_dst};
 ///   [0 destination_url]
 ///   [1 stream_regex]
 /// ```
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct SubscriberT<T: ?Sized> {
     tag: Uuid,
@@ -35,12 +35,17 @@ pub type Subscriber = SubscriberT<[u8]>;
 
 define_key!(SubscriberKey {
     prefix = Prefix::Subscriber,
+    id: Uuid,
+});
+
+define_key!(SubscriberTagIndexKey {
+    prefix = Prefix::SubscriberTagIndex,
     tag: Uuid,
     id: Uuid,
 });
 
-define_key!(SubscriberPrefix {
-    prefix = Prefix::Subscriber,
+define_key!(SubscriberTagPrefix {
+    prefix = Prefix::SubscriberTagIndex,
     tag: Uuid,
 });
 
@@ -60,26 +65,64 @@ impl Subscriber {
         unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 
-    /// Iterates over all subscribers of the given stream.
+    fn as_bytes(&self) -> &[u8] {
+        unsafe { ByteCast::as_bytes(self) }
+    }
+
+    pub fn create(txn: &DbTransaction, subscriber: &Subscriber) -> DynResult<Uuid> {
+        let id = Uuid::new_v4();
+        let key = SubscriberKey::new(id);
+        txn.put(key, subscriber.as_bytes())?;
+        let key = SubscriberTagIndexKey::new(subscriber.tag(), id);
+        txn.put(key, &[])?;
+        Ok(id)
+    }
+
+    pub fn get_by_id(txn: &DbTransaction, id: Uuid) -> Result<Option<Box<Self>>, rocksdb::Error> {
+        let key = SubscriberKey::new(id);
+        let bytes = txn.get(key)?;
+        if let Some(bytes) = bytes {
+            unsafe { Ok(Some(ByteCast::from_bytes_owned(bytes))) }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Iterates over subscribers by tag.
+    pub fn iter_subscribers<'a>(
+        txn: &'a DbTransaction,
+        tag: Uuid,
+    ) -> impl Iterator<Item = Result<(Uuid, Box<Self>), rocksdb::Error>> + 'a {
+        let prefix = SubscriberTagPrefix::new(tag);
+        txn.prefix_iterator(prefix).map(|item| {
+            let (bytes, _) = item?;
+            let key: SubscriberTagIndexKey =
+                unsafe { *(bytes.as_ptr() as *const SubscriberTagIndexKey) };
+            let id = key.id;
+
+            let subscriber = Self::get_by_id(txn, id)?.unwrap();
+            Ok((id, subscriber))
+        })
+    }
+
+    /// Iterates over all subscribers of the given stream. This may be slow if
+    /// there are a lot of subscribers for a given tag.
     pub fn iter_stream_subscribers<'a>(
         txn: &'a DbTransaction,
         tag: Uuid,
         stream: &'a str,
     ) -> impl Iterator<Item = Result<(Uuid, Box<Self>), rocksdb::Error>> + 'a {
-        let prefix = SubscriberPrefix::new(tag);
-        let iter = unsafe { with_types::<SubscriberKey, Subscriber>(txn.prefix_iterator(prefix)) };
-        iter.filter_map(|item| {
-            let (key, subscriber) = match item {
+        Self::iter_subscribers(txn, tag).filter_map(|item| {
+            let (id, subscriber) = match item {
                 Ok(x) => x,
                 Err(e) => return Some(Err(e)),
             };
-
             let regex = Regex::new(subscriber.stream_regex()).unwrap();
-            if !regex.is_match(stream) {
-                return None;
+            if regex.is_match(stream) {
+                Some(Ok((id, subscriber)))
+            } else {
+                None
             }
-
-            Some(Ok((key.id, subscriber)))
         })
     }
 
@@ -153,13 +196,18 @@ impl SubscriberBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use regex::Regex;
     use url::Url;
+
+    use crate::subscriber::Subscriber;
+    use crate::testing::TestHarness;
 
     use super::SubscriberBuilder;
 
     #[test]
-    fn test_build_subscriber() {
+    fn test_create_subscriber() {
         let url = "https://example.com/webhook";
         let regex = "^hello";
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
@@ -172,5 +220,17 @@ mod tests {
         assert_eq!(subscriber.tag(), tag);
         assert_eq!(subscriber.stream_regex(), regex);
         assert_eq!(subscriber.destination_url(), url);
+
+        let mut harness = TestHarness::new();
+        let db = Arc::new(harness.db());
+        let txn = db.transaction();
+        let id = Subscriber::create(&txn, &subscriber).unwrap();
+        txn.commit().unwrap();
+
+        let txn = db.transaction();
+        assert_eq!(
+            &Subscriber::get_by_id(&txn, id).unwrap().unwrap(),
+            &subscriber
+        );
     }
 }

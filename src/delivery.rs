@@ -96,6 +96,22 @@ impl Delivery {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         unsafe { ByteCast::as_bytes(self) }
     }
+
+    pub(crate) fn subscriber_id(&self) -> Uuid {
+        self.subscriber_id
+    }
+
+    pub(crate) fn event_id(&self) -> u64 {
+        self.event_id
+    }
+
+    pub(crate) fn next_attempt(&self) -> chrono::DateTime<Utc> {
+        self.next_attempt.into()
+    }
+
+    pub(crate) fn attempts_made(&self) -> u32 {
+        self.attempts_made
+    }
 }
 
 impl AsRef<[u8]> for Delivery {

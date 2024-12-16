@@ -256,19 +256,6 @@ impl<'db, T: ByteCast + ?Sized> std::ops::Deref for DbSlice<'db, T> {
     }
 }
 
-pub(crate) unsafe fn with_types<K, V>(
-    iter: impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
-) -> impl Iterator<Item = Result<(Box<K>, Box<V>), rocksdb::Error>>
-where
-    K: ByteCast + ?Sized,
-    V: ByteCast + ?Sized,
-{
-    iter.map(|item| {
-        let (k, v) = item?;
-        unsafe { Ok((ByteCast::from_bytes_owned(k), ByteCast::from_bytes_owned(v))) }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use crate::define_key;

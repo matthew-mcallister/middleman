@@ -4,7 +4,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::error::DynResult;
-use crate::types::{DbTransaction, Prefix};
+use crate::types::{Db, DbTransaction, Prefix};
 use crate::util::{join_slices, ByteCast, DbSlice};
 use crate::{define_key, impl_byte_cast_unsized, make_dst};
 
@@ -151,12 +151,14 @@ define_key!(EventIdempotencyKey {
 });
 
 pub(crate) struct EventTable {
-    db: Arc<rocksdb::OptimisticTransactionDB>,
+    db: Arc<Db>,
+    // XXX: Have to serialize this to the DB, probably once every 256
+    // increments or so
     event_sequence_number: AtomicU64,
 }
 
 impl EventTable {
-    pub fn new(db: Arc<rocksdb::OptimisticTransactionDB>) -> Self {
+    pub fn new(db: Arc<Db>) -> Self {
         Self {
             db,
             // XXX: Is there any real performance problem if we just implement
@@ -193,7 +195,7 @@ impl EventTable {
 
     pub fn get_by_id(&self, id: u64) -> DynResult<Option<DbSlice<'_, Event>>> {
         let key = EventKey::new(id);
-        // XXX: Is pinning the slice here a net performance win?
+        // XXX: Is pinning the slice here a performance win? In which cases?
         let slice = match self.db.get_pinned(&key)? {
             Some(slice) => slice,
             None => return Ok(None),

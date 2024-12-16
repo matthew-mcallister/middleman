@@ -13,7 +13,7 @@ rocksdb = { version = "0.22.0", features = ["multi-threaded-cf"] }
 tokio = { version = "1.41.1", features = ["full"] }
 tonic = "0.12.3"
 url = "2.5.4"
-uuid = "1.11.0"
+uuid = { version = "1.11.0", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.14.0"

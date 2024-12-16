@@ -7,7 +7,9 @@ pub enum Prefix {
     EventStreamIndex = 2,
     Delivery = 3,
     Subscriber = 4,
+    SubscriberTagIndex = 5,
 }
 
 pub(crate) type Db = rocksdb::OptimisticTransactionDB;
-pub(crate) type DbTransaction<'db> = rocksdb::Transaction<'db, rocksdb::OptimisticTransactionDB>;
+// XXX: Can we convert some uses of Transaction to WriteBatch?
+pub(crate) type DbTransaction<'db> = rocksdb::Transaction<'db, Db>;
