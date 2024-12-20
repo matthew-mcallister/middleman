@@ -1,10 +1,10 @@
 use chrono::{Datelike, Timelike, Utc};
 use uuid::Uuid;
 
-use crate::define_key;
 use crate::error::DynResult;
 use crate::types::{Db, DbTransaction, Prefix};
 use crate::util::ByteCast;
+use crate::{define_key, impl_byte_cast};
 
 // UTC datetime with stable binary representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,7 +50,7 @@ impl From<chrono::DateTime<chrono::Utc>> for DateTime {
 }
 
 /// Delivery of a single event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Delivery {
     subscriber_id: Uuid,
@@ -59,11 +59,19 @@ pub struct Delivery {
     attempts_made: u32,
 }
 
+impl_byte_cast!(Delivery);
+
 define_key!(DeliveryKey {
     prefix = Prefix::Delivery,
     subscriber_id: Uuid,
     event_id: u64,
 });
+
+impl AsRef<[u8]> for Delivery {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
 
 impl Delivery {
     pub(crate) fn create(
@@ -94,7 +102,7 @@ impl Delivery {
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
-        unsafe { ByteCast::as_bytes(self) }
+        unsafe { std::mem::transmute(ByteCast::as_bytes(self)) }
     }
 
     pub(crate) fn subscriber_id(&self) -> Uuid {
@@ -111,12 +119,6 @@ impl Delivery {
 
     pub(crate) fn attempts_made(&self) -> u32 {
         self.attempts_made
-    }
-}
-
-impl AsRef<[u8]> for Delivery {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
     }
 }
 

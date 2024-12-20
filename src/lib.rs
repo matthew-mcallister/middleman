@@ -11,6 +11,7 @@ pub mod config;
 pub mod delivery;
 pub mod error;
 pub mod event;
+mod model;
 pub mod subscriber;
 #[cfg(test)]
 mod testing;

@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 pub(crate) fn join_slices<T: Copy>(slices: &[&[T]]) -> Vec<T> {
     let len = slices.iter().map(|slice| slice.len()).sum();
     let mut vec = Vec::with_capacity(len);
@@ -87,148 +89,82 @@ macro_rules! define_key {
     };
 }
 
-pub(crate) trait ByteCast {
-    /// For slice-based DSTs, this is `usize`. For sized types, this is `()`.
-    type Size;
+pub trait ByteCast {
+    fn as_bytes(this: &Self) -> &[MaybeUninit<u8>];
 
-    /// Returns the alignment of `Self`.
-    fn align_of() -> usize;
-
-    /// Returns the size of an instance of `Self`, possibly excluding final
-    /// padding bytes.
-    // XXX: Not clear if it's UB when size is not a multiple of alignment.
-    fn size_of_tight(num_elems: Self::Size) -> usize;
-
+    /// # Safety
+    ///
+    /// `bytes` must contain a valid bit pattern for this type. Size
+    /// and alignment will be validated, but field values will not be.
+    /// This is a particular hazard for types with trap
+    /// representations, such as a struct containing a `bool` or enum.
     unsafe fn from_bytes(bytes: &[u8]) -> &Self;
 
+    /// # Safety
+    ///
+    /// See `from_bytes`.
     unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut Self;
 
-    /// Converts `Box<[u8]>` to `Box<T>`, assuming that the vector contains a
-    /// valid `T` value.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the box has insufficient size or alignment.
     unsafe fn from_bytes_owned(bytes: impl Into<Box<[u8]>>) -> Box<Self> {
         let mut bytes = bytes.into();
-        let ptr = unsafe { <Self as ByteCast>::from_bytes_mut(&mut *bytes) as *mut Self };
+        let ptr = unsafe { Self::from_bytes_mut(&mut *bytes) as *mut Self };
         std::mem::forget(bytes);
         unsafe { Box::from_raw(ptr) }
     }
-
-    /// Casts an object to a byte slice. Sadly, this is not guaranteed to be
-    /// safe, as it is undefined behavior to read padding bytes in a struct as
-    /// they are uninitialized. This method is only safe if all bytes in a
-    /// struct are initialized.
-    unsafe fn as_bytes(this: &Self) -> &[u8];
 }
 
-impl<T: Sized> ByteCast for T {
-    type Size = ();
-
-    fn align_of() -> usize {
-        std::mem::align_of::<T>()
-    }
-
-    fn size_of_tight(_: Self::Size) -> usize {
-        std::mem::size_of::<T>()
+impl ByteCast for [u8] {
+    fn as_bytes(this: &Self) -> &[MaybeUninit<u8>] {
+        unsafe { std::mem::transmute(this) }
     }
 
     unsafe fn from_bytes(bytes: &[u8]) -> &Self {
-        assert!(bytes.len() >= std::mem::size_of::<T>());
-        assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
-        unsafe { &*(bytes.as_ptr() as *const Self) }
+        bytes
     }
 
     unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut Self {
-        assert!(bytes.len() >= std::mem::size_of::<T>());
-        assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
-        unsafe { &mut *(bytes.as_mut_ptr() as *mut Self) }
-    }
-
-    unsafe fn as_bytes(this: &Self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                this as *const Self as *const u8,
-                std::mem::size_of::<Self>(),
-            )
-        }
+        bytes
     }
 }
 
-/// Implements ByteCast for `$struct<[T]>`.
+impl ByteCast for str {
+    fn as_bytes(this: &Self) -> &[MaybeUninit<u8>] {
+        unsafe { std::mem::transmute(this.as_bytes()) }
+    }
+
+    unsafe fn from_bytes(bytes: &[u8]) -> &Self {
+        unsafe { std::str::from_utf8_unchecked(bytes) }
+    }
+
+    unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut Self {
+        unsafe { std::str::from_utf8_unchecked_mut(bytes) }
+    }
+}
+
 #[macro_export]
-macro_rules! impl_byte_cast_unsized {
-    ($struct:ident, $slice:ident) => {
-        impl<T> ByteCast for $struct<[T]> {
-            type Size = usize;
-
-            fn align_of() -> usize {
-                std::mem::align_of::<$struct<T>>()
-            }
-
-            fn size_of_tight(num_elems: Self::Size) -> usize {
-                let slice_offset = std::mem::offset_of!($struct<T>, $slice);
-                let slice_len = num_elems * std::mem::size_of::<T>();
-                let len = slice_offset + slice_len;
-                std::cmp::max(std::mem::size_of::<$struct<[T; 0]>>(), len)
+macro_rules! impl_byte_cast {
+    ($Type:ident) => {
+        impl crate::util::ByteCast for $Type {
+            fn as_bytes(this: &Self) -> &[std::mem::MaybeUninit<u8>] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        this as *const Self as *const std::mem::MaybeUninit<u8>,
+                        std::mem::size_of::<Self>(),
+                    )
+                }
             }
 
             unsafe fn from_bytes(bytes: &[u8]) -> &Self {
-                assert!(bytes.len() >= <Self as ByteCast>::size_of_tight(0));
-                assert_eq!(bytes.as_ptr() as usize % <Self as ByteCast>::align_of(), 0);
-                let slice_offset = std::mem::offset_of!($struct<T>, $slice);
-                let num_elems = (bytes.len() - slice_offset) / std::mem::size_of::<T>();
-                unsafe { std::mem::transmute((bytes.as_ptr(), num_elems)) }
+                assert_eq!(bytes.len(), std::mem::size_of::<$Type>());
+                assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<$Type>(), 0);
+                unsafe { &*(bytes.as_ptr() as *const Self) }
             }
 
             unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut Self {
-                assert!(bytes.len() >= <Self as ByteCast>::size_of_tight(0));
-                assert_eq!(bytes.as_ptr() as usize % <Self as ByteCast>::align_of(), 0);
-                let slice_offset = std::mem::offset_of!($struct<T>, $slice);
-                let num_elems = (bytes.len() - slice_offset) / std::mem::size_of::<T>();
-                unsafe { std::mem::transmute((bytes.as_mut_ptr(), num_elems)) }
+                assert_eq!(bytes.len(), std::mem::size_of::<$Type>());
+                assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<$Type>(), 0);
+                unsafe { &mut *(bytes.as_mut_ptr() as *mut Self) }
             }
-
-            unsafe fn as_bytes(this: &Self) -> &[u8] {
-                unsafe {
-                    let (_, num_elems): (usize, usize) = std::mem::transmute(this);
-                    let size = <Self as ByteCast>::size_of_tight(num_elems);
-                    std::slice::from_raw_parts(this as *const Self as *const u8, size)
-                }
-            }
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! make_dst {
-    (
-        $struct:ident[$slice_type:ty] {
-            $($field:ident: $value:expr),+
-            $(, [$slice:ident]: ($($payload:expr),+$(,)?))?$(,)?
-        }
-    ) => {
-        {
-            let num_elems = 0 $($(+ $payload.len())*)?;
-            let len = <$struct<[$slice_type]> as ByteCast>::size_of_tight(num_elems);
-            let mut buffer: Vec<u8> = Vec::with_capacity(len);
-
-            let ptr: *mut $struct<$slice_type> = buffer.as_mut_ptr() as *mut _;
-            // XXX: (*ptr) is potentially UB...
-            $(std::ptr::addr_of_mut!((*ptr).$field).write($value);)*
-
-            $(
-                let mut _ptr = std::ptr::addr_of_mut!((*ptr).$slice);
-                $(
-                    let expr = $payload;
-                    _ptr.copy_from(expr.as_ptr(), expr.len());
-                    _ptr = _ptr.offset(expr.len() as _);
-                )*
-            )?
-
-            buffer.set_len(len);
-            <$struct<[$slice_type]> as ByteCast>::from_bytes_owned(buffer)
         }
     };
 }
@@ -248,7 +184,7 @@ impl<'db, T: ByteCast + ?Sized> DbSlice<'db, T> {
     }
 }
 
-impl<'db, T: ByteCast + ?Sized> std::ops::Deref for DbSlice<'db, T> {
+impl<'db, T: ?Sized> std::ops::Deref for DbSlice<'db, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -260,7 +196,7 @@ impl<'db, T: ByteCast + ?Sized> std::ops::Deref for DbSlice<'db, T> {
 mod tests {
     use crate::define_key;
     use crate::types::Prefix;
-    use crate::util::{BigEndianU32, ByteCast};
+    use crate::util::BigEndianU32;
 
     #[test]
     fn test_big_endian() {
@@ -281,20 +217,5 @@ mod tests {
         let bytes = [0, 1, 0, 0, 0, 2];
         assert_eq!(key.as_bytes(), &bytes);
         assert_eq!(<[u8; 6]>::from(key), bytes);
-    }
-
-    #[test]
-    fn test_from_to_bytes() {
-        struct S<T: ?Sized> {
-            a: u32,
-            b: u8,
-            c: T,
-        }
-        impl_byte_cast_unsized!(S, c);
-        let bytes = [1, 0, 0, 0, 2, 0, 3, 0, 4, 0];
-        let s: Box<S<[u16]>> = unsafe { ByteCast::from_bytes_owned(bytes) };
-        assert_eq!(s.a, 1);
-        assert_eq!(s.b, 2);
-        assert_eq!(&s.c[..], [3, 4]);
     }
 }

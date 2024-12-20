@@ -5,33 +5,22 @@ use uuid::Uuid;
 use crate::delivery::Delivery;
 use crate::error::DynResult;
 use crate::event::Event;
+use crate::model::VariableSizeModel;
 use crate::types::{DbTransaction, Prefix};
 use crate::util::ByteCast;
-use crate::{define_key, impl_byte_cast_unsized, make_dst};
+use crate::{define_key, variable_size_model};
 
-/// Subscriber that receives events.
-///
-/// # Layout
-///
-/// ```ignore
-///   [fixed header]
-///   [0 destination_url]
-///   [1 stream_regex]
-/// ```
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct SubscriberT<T: ?Sized> {
-    tag: Uuid,
-    _flags: u32,
-    _reserved: u32,
-    // Allows adding extensions in the future
-    _next_header: u32,
-    offsets: [u32; 1],
-    content: T,
+variable_size_model! {
+    /// Subscriber that receives events.
+    #[derive(Debug, Eq, PartialEq)]
+    pub struct Subscriber {
+        tag: Uuid,
+        _flags: u32,
+        _reserved: u32,
+        [pub destination_url: 0]: str,
+        [pub stream_regex: 1]: str,
+    }
 }
-impl_byte_cast_unsized!(SubscriberT, content);
-
-pub type Subscriber = SubscriberT<[u8]>;
 
 define_key!(SubscriberKey {
     prefix = Prefix::Subscriber,
@@ -51,28 +40,13 @@ define_key!(SubscriberTagPrefix {
 
 impl Subscriber {
     pub fn tag(&self) -> Uuid {
-        self.tag
-    }
-
-    pub fn destination_url(&self) -> &str {
-        let bytes = &self.content[..self.offsets[0] as _];
-        unsafe { std::str::from_utf8_unchecked(bytes) }
-    }
-
-    pub fn stream_regex(&self) -> &str {
-        // XXX: Cache the compiled regex
-        let bytes = &self.content[self.offsets[0] as _..];
-        unsafe { std::str::from_utf8_unchecked(bytes) }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        unsafe { ByteCast::as_bytes(self) }
+        self.0.header.tag
     }
 
     pub fn create(txn: &DbTransaction, subscriber: &Subscriber) -> DynResult<Uuid> {
         let id = Uuid::new_v4();
         let key = SubscriberKey::new(id);
-        txn.put(key, subscriber.as_bytes())?;
+        txn.put(key, subscriber)?;
         let key = SubscriberTagIndexKey::new(subscriber.tag(), id);
         txn.put(key, &[])?;
         Ok(id)
@@ -178,19 +152,19 @@ impl SubscriberBuilder {
 
         let stream_regex = self.stream_regex.take().ok_or("Missing subscriber regex")?;
 
-        unsafe {
-            Ok(make_dst!(SubscriberT[u8] {
+        let subscriber = VariableSizeModel::new(
+            SubscriberHeader {
                 tag: self.tag,
                 _reserved: 0,
                 _flags: 0,
-                _next_header: 0,
-                offsets: [destination_url.as_ref().len() as _],
-                [content]: (
-                    destination_url.as_ref().as_bytes(),
-                    stream_regex.as_str().as_bytes(),
-                ),
-            }))
-        }
+            },
+            &[
+                destination_url.as_ref().as_bytes(),
+                stream_regex.as_str().as_bytes(),
+            ],
+        );
+
+        Ok(subscriber.into())
     }
 }
 

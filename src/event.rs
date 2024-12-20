@@ -4,9 +4,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::error::DynResult;
+use crate::model::VariableSizeModel;
 use crate::types::{Db, DbTransaction, Prefix};
-use crate::util::{join_slices, ByteCast, DbSlice};
-use crate::{define_key, impl_byte_cast_unsized, make_dst};
+use crate::util::{join_slices, DbSlice};
+use crate::{define_key, variable_size_model};
 
 // XXX: Probably just replace with string interning
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -26,31 +27,18 @@ impl std::fmt::Display for ContentType {
     }
 }
 
-/// Immutable event data structure.
-///
-/// # Layout
-///
-/// ```ignore
-///   [header]
-///   [0 stream]
-///   [1 payload]
-/// ```
-#[derive(Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct EventT<T: ?Sized> {
-    idempotency_key: Uuid,
-    tag: Uuid,
-    _flags: u32,
-    _reserved: u32,
-    // Allows adding extensions in the future
-    _next_header: u32,
-    offsets: [u32; 1],
-    content: T,
+variable_size_model! {
+    /// Immutable event data structure.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Event {
+        idempotency_key: Uuid,
+        tag: Uuid,
+        _flags: u32,
+        _reserved: u32,
+        [pub stream: 0]: str,
+        [pub payload: 1]: [u8],
+    }
 }
-
-pub type Event = EventT<[u8]>;
-
-impl_byte_cast_unsized!(EventT, content);
 
 impl Event {
     pub fn content_type(&self) -> ContentType {
@@ -59,29 +47,15 @@ impl Event {
     }
 
     pub fn idempotency_key(&self) -> Uuid {
-        self.idempotency_key
+        self.0.header.idempotency_key
     }
 
     pub fn tag(&self) -> Uuid {
-        self.tag
+        self.0.header.tag
     }
 
-    pub fn stream(&self) -> &str {
-        unsafe { std::str::from_utf8_unchecked(&self.content[..self.offsets[0] as usize]) }
-    }
-
-    pub fn payload(&self) -> &[u8] {
-        &self.content[self.offsets[0] as usize..]
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe { ByteCast::as_bytes(self) }
-    }
-}
-
-impl AsRef<[u8]> for Event {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
+    fn as_bytes(&self) -> &[u8] {
+        self.as_ref()
     }
 }
 
@@ -126,15 +100,15 @@ impl<'a> EventBuilder<'a> {
 
     pub fn build(&mut self) -> Box<Event> {
         unsafe {
-            make_dst!(EventT[u8] {
-                _reserved: 0,
-                _next_header: 0,
-                _flags: 0,
-                tag: self.tag,
-                idempotency_key: self.idempotency_key,
-                offsets: [self.stream.len() as u32],
-                [content]: (self.stream, self.payload),
-            })
+            std::mem::transmute(VariableSizeModel::new(
+                EventHeader {
+                    tag: self.tag,
+                    idempotency_key: self.idempotency_key,
+                    _flags: 0,
+                    _reserved: 0,
+                },
+                &[self.stream.as_bytes(), self.payload],
+            ))
         }
     }
 }
