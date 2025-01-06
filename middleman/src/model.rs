@@ -122,13 +122,6 @@ impl<H, const N: usize> ByteCast for VariableSizeModel<H, N> {
 }
 
 #[macro_export]
-macro_rules! cnst {
-    ($token:tt, $const:expr) => {
-        $const
-    };
-}
-
-#[macro_export]
 macro_rules! variable_size_model {
     (
         $(#[$($meta:tt)*])*
