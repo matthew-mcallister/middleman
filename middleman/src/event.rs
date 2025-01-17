@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+use crate::bytes::{join_slices, DbSlice};
 use crate::error::DynResult;
 use crate::model::VariableSizeModel;
 use crate::types::{Db, DbTransaction, Prefix};
-use crate::util::{join_slices, DbSlice};
 use crate::{define_key, variable_size_model};
 
 // XXX: Probably just replace with string interning

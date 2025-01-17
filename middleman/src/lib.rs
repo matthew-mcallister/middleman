@@ -1,5 +1,40 @@
 use std::sync::Arc;
 
+use config::Config;
+use error::DynResult;
+use types::Db;
+
+pub mod accessor;
+pub mod big_tuple;
+pub mod bytes;
+pub mod comparator;
+pub mod config;
+pub mod error;
+pub mod key;
+pub mod prefix;
+#[cfg(test)]
+mod testing;
+pub mod types;
+
+pub struct Application {
+    pub(crate) config: Box<Config>,
+    pub(crate) db: Arc<Db>,
+}
+
+impl Application {
+    pub fn new(config: Box<Config>) -> DynResult<Self> {
+        let mut options = rocksdb::Options::default();
+        options.create_if_missing(true);
+        let db = Db::open(&options, &config.db_dir)?;
+        let db = Arc::new(db);
+
+        Ok(Self { config, db })
+    }
+}
+
+/*
+use std::sync::Arc;
+
 use subscriber::Subscriber;
 use types::Db;
 
@@ -8,17 +43,15 @@ use crate::error::DynResult;
 use crate::event::{Event, EventTable};
 
 pub mod accessor;
-pub mod key;
+pub mod bytes;
 pub mod config;
 pub mod delivery;
 pub mod error;
 pub mod event;
+pub mod key;
 mod model;
 pub mod subscriber;
-#[cfg(test)]
-mod testing;
 pub mod types;
-mod util;
 
 pub struct Application {
     pub(crate) config: Box<Config>,
@@ -139,3 +172,4 @@ mod tests {
         assert_eq!(delivery2.attempts_made(), 0);
     }
 }
+*/

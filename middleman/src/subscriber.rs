@@ -2,12 +2,12 @@ use regex::Regex;
 use url::Url;
 use uuid::Uuid;
 
+use crate::bytes::ByteCast;
 use crate::delivery::Delivery;
 use crate::error::DynResult;
 use crate::event::Event;
 use crate::model::VariableSizeModel;
 use crate::types::{DbTransaction, Prefix};
-use crate::util::ByteCast;
 use crate::{define_key, variable_size_model};
 
 variable_size_model! {

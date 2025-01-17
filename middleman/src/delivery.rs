@@ -1,9 +1,9 @@
 use chrono::{Datelike, Timelike, Utc};
 use uuid::Uuid;
 
+use crate::bytes::ByteCast;
 use crate::error::DynResult;
 use crate::types::{Db, DbTransaction, Prefix};
-use crate::util::ByteCast;
 use crate::{define_key, impl_byte_cast};
 
 // UTC datetime with stable binary representation.

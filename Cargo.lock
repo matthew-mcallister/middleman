@@ -225,9 +225,9 @@ dependencies = [
 
 [[package]]
 name = "bitflags"
-version = "2.6.0"
+version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de"
+checksum = "8f68f53c83ab957f72c32642f3868eec03eb974d1fb82e453128456482613d36"
 
 [[package]]
 name = "bumpalo"
@@ -937,10 +937,12 @@ checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 name = "middleman"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "byteorder",
  "chrono",
  "clap",
  "dotenvy",
+ "middleman_macros",
  "paste",
  "regex",
  "rocksdb",
@@ -949,6 +951,15 @@ dependencies = [
  "tonic",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "middleman_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -1,5 +1,8 @@
 use std::convert::TryFrom;
 
+use crate::bytes::AsBytes;
+use crate::prefix::IsPrefixOf;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StringOverflowError;
 
@@ -15,6 +18,7 @@ impl std::error::Error for StringOverflowError {}
 // is out of the valid codepoint range (0x80-0x7ff).
 const UTF8_INVALID_BYTE: u8 = 0xc0;
 
+// XXX: Sigh... this is obsoleted by using comparators.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FiniteString<const N: usize> {
     bytes: [u8; N],
@@ -39,7 +43,7 @@ impl<const N: usize> AsRef<str> for FiniteString<N> {
             None => N,
         };
         let ptr = self.bytes.as_ptr();
-        unsafe { 
+        unsafe {
             let bytes: &[u8] = std::slice::from_raw_parts(ptr, len);
             std::str::from_utf8_unchecked(bytes)
         }
@@ -48,7 +52,7 @@ impl<const N: usize> AsRef<str> for FiniteString<N> {
 
 impl<'s, const N: usize> TryFrom<&'s str> for FiniteString<N> {
     type Error = StringOverflowError;
-    
+
     fn try_from(value: &'s str) -> Result<Self, Self::Error> {
         if value.len() > N {
             Err(StringOverflowError)
@@ -59,6 +63,8 @@ impl<'s, const N: usize> TryFrom<&'s str> for FiniteString<N> {
         }
     }
 }
+
+unsafe impl<const N: usize> AsBytes for FiniteString<N> {}
 
 macro_rules! big_endian_int {
     ($BeInt:ident, $Int:ty) => {
@@ -89,40 +95,13 @@ macro_rules! big_endian_int {
                 &self.0
             }
         }
+        unsafe impl AsBytes for $BeInt {}
     };
 }
 
 big_endian_int!(BigEndianU16, u16);
 big_endian_int!(BigEndianU32, u32);
 big_endian_int!(BigEndianU64, u64);
-
-/// Marks a type as safe to reinterpret as a byte slice (`&[u8]`). This means
-/// the type must not contain uninitialized data, e.g. interior padding bytes,
-/// trailing padding bytes, enums with fields, unions in general.
-pub unsafe trait ByteSafe {
-    fn as_bytes(this: &Self) -> &[u8] {
-        let ptr = this as *const Self as *const u8;
-        let len = std::mem::size_of_val(this);
-        unsafe { std::slice::from_raw_parts(ptr, len) }
-    }
-}
-
-unsafe impl ByteSafe for u8 {}
-unsafe impl ByteSafe for u16 {}
-unsafe impl ByteSafe for u32 {}
-unsafe impl ByteSafe for u64 {}
-unsafe impl ByteSafe for u128 {}
-unsafe impl ByteSafe for usize {}
-unsafe impl ByteSafe for i8 {}
-unsafe impl ByteSafe for i16 {}
-unsafe impl ByteSafe for i32 {}
-unsafe impl ByteSafe for i64 {}
-unsafe impl ByteSafe for i128 {}
-unsafe impl ByteSafe for isize {}
-unsafe impl<T: ByteSafe, const N: usize> ByteSafe for [T; N] {}
-unsafe impl<T: ByteSafe> ByteSafe for [T] {}
-unsafe impl ByteSafe for str {}
-unsafe impl<const N: usize> ByteSafe for FiniteString<N> {}
 
 macro_rules! impl_packed_tuple {
     ($PackedN:ident, $($T:ident),*$(,)?) => {
@@ -144,15 +123,7 @@ macro_rules! impl_packed_tuple {
             }
         }
 
-        unsafe impl<$($T: ByteSafe,)*> ByteSafe for $PackedN<$($T,)*> {}
-
-        impl<$($T: ByteSafe,)*> AsRef<[u8]> for $PackedN<$($T,)*> {
-            fn as_ref(&self) -> &[u8] {
-                let ptr = self as *const Self as *const u8;
-                let len = 0 $(+ std::mem::size_of::<$T>())*;
-                unsafe { std::slice::from_raw_parts(ptr, len) }
-            }
-        }
+        unsafe impl<$($T: AsBytes,)*> AsBytes for $PackedN<$($T,)*> {}
     };
 }
 
@@ -164,56 +135,134 @@ impl_packed_tuple!(Packed6, T, U, V, W, X, Y);
 
 #[macro_export]
 macro_rules! packed {
-    ($_0:expr) => { $_0 };
-    ($_1:expr, $_2:expr) => { Packed2($_1, $_2) };
-    ($_1:expr, $_2:expr, $_3:expr) => { Packed3($_1, $_2, $_3) };
-    ($_1:expr, $_2:expr, $_3:expr, $_4:expr) => { Packed4($_1, $_2, $_3, $_4) };
-    ($_1:expr, $_2:expr, $_3:expr, $_4:expr, $_5:expr) => { Packed5($_1, $_2, $_3, $_4, $_5) };
-    ($_1:expr, $_2:expr, $_3:expr, $_4:expr, $_5:expr, $_6:expr) => { Packed6($_1, $_2, $_3, $_4, $_5, $_6) };
+    ($_0:expr) => {
+        $_0
+    };
+    ($_1:expr, $_2:expr) => {
+        Packed2($_1, $_2)
+    };
+    ($_1:expr, $_2:expr, $_3:expr) => {
+        Packed3($_1, $_2, $_3)
+    };
+    ($_1:expr, $_2:expr, $_3:expr, $_4:expr) => {
+        Packed4($_1, $_2, $_3, $_4)
+    };
+    ($_1:expr, $_2:expr, $_3:expr, $_4:expr, $_5:expr) => {
+        Packed5($_1, $_2, $_3, $_4, $_5)
+    };
+    ($_1:expr, $_2:expr, $_3:expr, $_4:expr, $_5:expr, $_6:expr) => {
+        Packed6($_1, $_2, $_3, $_4, $_5, $_6)
+    };
 }
 
-/// Trait for automatically preparing a value for use in a key. Mainly, this is
-/// used to convert integers to big-endian format so they can be sorted.
-// XXX: Really this should just return [u8; N] but the compiler doesn't support
-// it...
-pub trait AsKey {
-    fn as_key(self) -> impl ByteSafe;
-}
-
-macro_rules! impl_as_key_int {
-    ($($Int:ty),*$(,)?) => {
-        $(
-            impl AsKey for $Int {
-                fn as_key(self) -> impl ByteSafe {
-                    self.to_be_bytes()
-                }
+macro_rules! impl_bytes_as_prefix_of_packed_tuple {
+    ($PackedN:ident<$($T:ident),*>) => {
+        impl<$($T: AsBytes),*> IsPrefixOf<$PackedN<$($T),*>> for [u8] {
+            fn is_prefix_of(&self, other: &$PackedN<$($T),*>) -> bool {
+                self.is_prefix_of(AsBytes::as_bytes(other))
             }
-        )*
-    }
+        }
+    };
 }
 
-impl_as_key_int!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
+impl_bytes_as_prefix_of_packed_tuple!(Packed2<T, U>);
+impl_bytes_as_prefix_of_packed_tuple!(Packed3<T, U, V>);
+impl_bytes_as_prefix_of_packed_tuple!(Packed4<T, U, V, W>);
+impl_bytes_as_prefix_of_packed_tuple!(Packed5<T, U, V, W, X>);
+impl_bytes_as_prefix_of_packed_tuple!(Packed6<T, U, V, W, X, Y>);
 
-macro_rules! impl_as_key_tuple {
-    ($($T:ident),*) => {
-        #[allow(non_snake_case)]
-        impl<$($T: AsKey,)*> AsKey for ($($T,)*) {
-            fn as_key(self) -> impl ByteSafe {
-                let ($($T),*) = self;
-                $crate::packed!($($T.as_key()),*)
+/*
+macro_rules! impl_packed_tuple_is_prefix_of {
+    ($Lhs:ident, $Rhs:ident; $($index:tt: $T:ident),*; $index_u:tt: $U:ident; $($V:ident),*) => {
+        impl<$($T: Copy + Eq),*, $U: Copy + IsPrefixOf, $($V),*> IsPrefixOf<$Rhs<$($T),*, $U, $($V),*>> for $Lhs<$($T),*, $U> {
+            fn is_prefix_of(&self, other: &$Rhs<$($T),*, $U, $($V),*>) -> bool {
+                true
+                    $(&& {
+                        let lhs = self.$index;
+                        let rhs = other.$index;
+                        lhs == rhs
+                    })*
+                    && {
+                        let lhs = self.$index_u;
+                        let rhs = other.$index_u;
+                        lhs.is_prefix_of(&rhs)
+                    }
+            }
+        }
+    };
+    ($Tuple:ident; $T:ident, $($U:ident),*) => {
+        impl<$T: Copy + IsPrefixOf, $($U),*> IsPrefixOf<$Tuple<$T, $($U),*>> for $T {
+            fn is_prefix_of(&self, other: &$Tuple<$T, $($U),*>) -> bool {
+                let rhs = other.0;
+                self.is_prefix_of(&rhs)
             }
         }
     }
 }
 
-impl_as_key_tuple!(T, U);
-impl_as_key_tuple!(T, U, V);
-impl_as_key_tuple!(T, U, V, W);
-impl_as_key_tuple!(T, U, V, W, X);
-impl_as_key_tuple!(T, U, V, W, X, Y);
+impl_packed_tuple_is_prefix_of!(Packed2; T, U);
+impl_packed_tuple_is_prefix_of!(Packed3; T, U, V);
+impl_packed_tuple_is_prefix_of!(Packed4; T, U, V, W);
+impl_packed_tuple_is_prefix_of!(Packed5; T, U, V, W, X);
+impl_packed_tuple_is_prefix_of!(Packed6; T, U, V, W, X, Y);
 
-impl<const N: usize> AsKey for FiniteString<N> {
-    fn as_key(self) -> impl ByteSafe {
-        self
+impl_packed_tuple_is_prefix_of!(Packed2, Packed2; 0: T; 1: U;);
+impl_packed_tuple_is_prefix_of!(Packed2, Packed3; 0: T; 1: U; V);
+impl_packed_tuple_is_prefix_of!(Packed2, Packed4; 0: T; 1: U; V, W);
+impl_packed_tuple_is_prefix_of!(Packed2, Packed5; 0: T; 1: U; V, W, X);
+impl_packed_tuple_is_prefix_of!(Packed2, Packed6; 0: T; 1: U; V, W, X, Y);
+
+impl_packed_tuple_is_prefix_of!(Packed3, Packed3; 0: T, 1: U; 2: V;);
+impl_packed_tuple_is_prefix_of!(Packed3, Packed4; 0: T, 1: U; 2: V; W);
+impl_packed_tuple_is_prefix_of!(Packed3, Packed5; 0: T, 1: U; 2: V; W, X);
+impl_packed_tuple_is_prefix_of!(Packed3, Packed6; 0: T, 1: U; 2: V; W, X, Y);
+
+impl_packed_tuple_is_prefix_of!(Packed4, Packed4; 0: T, 1: U, 2: V; 3: W;);
+impl_packed_tuple_is_prefix_of!(Packed4, Packed5; 0: T, 1: U, 2: V; 3: W; X);
+impl_packed_tuple_is_prefix_of!(Packed4, Packed6; 0: T, 1: U, 2: V; 3: W; X, Y);
+
+impl_packed_tuple_is_prefix_of!(Packed5, Packed5; 0: T, 1: U, 2: V, 3: W; 4: X;);
+impl_packed_tuple_is_prefix_of!(Packed5, Packed6; 0: T, 1: U, 2: V, 3: W; 4: X; Y);
+
+impl_packed_tuple_is_prefix_of!(Packed6, Packed6; 0: T, 1: U, 2: V, 3: W, 4: X; 5: Y;);
+*/
+
+#[cfg(test)]
+mod tests {
+    use crate::bytes::{AsBytes, FromBytesUnchecked};
+    use middleman_macros::db_key;
+
+    use super::*;
+
+    #[test]
+    fn test_key_macro() {
+        #[db_key]
+        struct MyKey {
+            a: BigEndianU16,
+            b: FiniteString<4>,
+            c: BigEndianU16,
+        }
+
+        let key = MyKey {
+            a: 1.into(),
+            b: FiniteString::try_from("blah").unwrap(),
+            c: 2.into(),
+        };
+        let bytes: [u8; 8] = [0, 1, 'b' as _, 'l' as _, 'a' as _, 'h' as _, 0, 2];
+        assert_eq!(MyKey::as_bytes(&key), bytes);
+        unsafe {
+            assert_eq!(*MyKey::ref_from_bytes_unchecked(&bytes), key);
+        }
+    }
+
+    #[test]
+    fn test_packed_prefix() {
+        let tuple = Packed3(1u32, 2u32, 3u32);
+        assert!(1u32.to_ne_bytes().is_prefix_of(&tuple));
+        assert!(AsBytes::as_bytes(&Packed2(1u32, 2u32)).is_prefix_of(&tuple));
+        assert!(AsBytes::as_bytes(&tuple).is_prefix_of(&tuple));
+        assert!(!2u32.to_ne_bytes().is_prefix_of(&tuple));
+        assert!(!AsBytes::as_bytes(&Packed3(1u32, 2u32, 4u32)).is_prefix_of(&tuple));
+        assert!(!AsBytes::as_bytes(&Packed3(2u32, 2u32, 3u32)).is_prefix_of(&tuple));
     }
 }
