@@ -1,10 +1,14 @@
+use std::sync::Arc;
+
 use chrono::{Datelike, Timelike, Utc};
 use uuid::Uuid;
 
-use crate::bytes::ByteCast;
+use crate::accessor::CfAccessor;
+use crate::bytes::AsBytes;
 use crate::error::DynResult;
-use crate::types::{Db, DbTransaction, Prefix};
-use crate::{define_key, impl_byte_cast};
+use crate::key::Packed2;
+use crate::types::{Db, DbColumnFamily, DbTransaction};
+use crate::util::get_or_create_cf;
 
 // UTC datetime with stable binary representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,15 +31,15 @@ impl From<DateTime> for chrono::NaiveDateTime {
     }
 }
 
-impl From<DateTime> for chrono::DateTime<chrono::Utc> {
+impl From<DateTime> for chrono::DateTime<Utc> {
     fn from(value: DateTime) -> Self {
         let naive: chrono::NaiveDateTime = value.into();
-        chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc)
+        chrono::DateTime::from_naive_utc_and_offset(naive, Utc)
     }
 }
 
-impl From<chrono::DateTime<chrono::Utc>> for DateTime {
-    fn from(value: chrono::DateTime<chrono::Utc>) -> Self {
+impl From<chrono::DateTime<Utc>> for DateTime {
+    fn from(value: chrono::DateTime<Utc>) -> Self {
         let year = value.year();
         let day = value.day();
         let yof = year << 9 | (day as i32);
@@ -50,7 +54,7 @@ impl From<chrono::DateTime<chrono::Utc>> for DateTime {
 }
 
 /// Delivery of a single event.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Delivery {
     subscriber_id: Uuid,
@@ -59,52 +63,50 @@ pub struct Delivery {
     attempts_made: u32,
 }
 
-impl_byte_cast!(Delivery);
+unsafe impl AsBytes for Delivery {}
 
-define_key!(DeliveryKey {
-    prefix = Prefix::Delivery,
-    subscriber_id: Uuid,
-    event_id: u64,
-});
-
-impl AsRef<[u8]> for Delivery {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
+pub struct DeliveryTable {
+    db: Arc<Db>,
+    cf: DbColumnFamily,
 }
 
-impl Delivery {
+impl DeliveryTable {
+    pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
+        let cf = unsafe { get_or_create_cf(&db, "deliveries", &Default::default())? };
+        Ok(Self { db, cf })
+    }
+
+    fn accessor<'a>(&'a self) -> CfAccessor<'a, Packed2<Uuid, u64>, Delivery> {
+        CfAccessor::new(&self.db, &self.cf)
+    }
+
     pub(crate) fn create(
+        &self,
         txn: &DbTransaction,
         subscriber_id: Uuid,
         event_id: u64,
-    ) -> DynResult<Self> {
+    ) -> DynResult<Delivery> {
         let delivery = Delivery {
             subscriber_id,
             event_id,
             attempts_made: 0,
             next_attempt: Utc::now().into(),
         };
-
-        let key = DeliveryKey::new(subscriber_id, event_id);
-        txn.put(key, &delivery)?;
-
+        self.accessor()
+            .put_txn(&txn, &(subscriber_id, event_id).into(), &delivery)?;
         Ok(delivery)
     }
 
-    pub(crate) fn get(db: &Db, subscriber_id: Uuid, event_id: u64) -> DynResult<Option<Box<Self>>> {
-        let key = DeliveryKey::new(subscriber_id, event_id);
-        let bytes = match db.get(key)? {
-            Some(bytes) => bytes,
-            None => return Ok(None),
-        };
-        unsafe { Ok(Some(ByteCast::from_bytes_owned(bytes))) }
+    pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> DynResult<Option<Delivery>> {
+        unsafe {
+            Ok(self
+                .accessor()
+                .get_unchecked(&(subscriber_id, event_id).into())?)
+        }
     }
+}
 
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        unsafe { std::mem::transmute(ByteCast::as_bytes(self)) }
-    }
-
+impl Delivery {
     pub(crate) fn subscriber_id(&self) -> Uuid {
         self.subscriber_id
     }
@@ -124,24 +126,23 @@ impl Delivery {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::TestHarness;
+    use std::sync::Arc;
 
-    use super::Delivery;
+    use crate::{delivery::DeliveryTable, testing::TestHarness};
 
     #[test]
     fn test_create_delivery() {
         let mut harness = TestHarness::new();
         let db = harness.db();
+        let table = DeliveryTable::new(Arc::clone(&db)).unwrap();
 
         let subscriber_id = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let event_id: u64 = 1;
         let txn = db.transaction();
-        let delivery = Delivery::create(&txn, subscriber_id, event_id).unwrap();
+        let delivery = table.create(&txn, subscriber_id, event_id).unwrap();
         txn.commit().unwrap();
 
-        let delivery2 = Delivery::get(&db, subscriber_id, event_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(delivery, *delivery2);
+        let delivery2 = table.get(subscriber_id, event_id).unwrap().unwrap();
+        assert_eq!(delivery, delivery2);
     }
 }

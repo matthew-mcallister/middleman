@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// Binary key prefix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -13,3 +15,4 @@ pub enum Prefix {
 pub(crate) type Db = rocksdb::OptimisticTransactionDB;
 // XXX: Can we convert some uses of Transaction to WriteBatch?
 pub(crate) type DbTransaction<'db> = rocksdb::Transaction<'db, Db>;
+pub(crate) type DbColumnFamily = Arc<rocksdb::BoundColumnFamily<'static>>;

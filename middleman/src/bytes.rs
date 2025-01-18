@@ -1,5 +1,7 @@
 use std::mem::MaybeUninit;
 
+use uuid::Uuid;
+
 pub trait FromBytesUnchecked {
     /// # Safety
     ///
@@ -49,6 +51,7 @@ unsafe impl AsBytes for isize {}
 unsafe impl<T: AsBytes, const N: usize> AsBytes for [T; N] {}
 unsafe impl<T: AsBytes> AsBytes for [T] {}
 unsafe impl AsBytes for str {}
+unsafe impl AsBytes for Uuid {}
 
 /// Converts an object reference into a slice of *possibly uninitialized*
 /// bytes. Any type with padding bytes will likely expose uninitialized memory

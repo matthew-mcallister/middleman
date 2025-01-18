@@ -13,7 +13,8 @@ bitflags! {
         /// Use 32-bit field offsets.
         const BIG_FIELDS = 0x01;
         /// Align field offsets to 8 bytes.
-        const ALIGNED = 0x02;
+        // XXX: Should this align to alignof(max_align_t) instead?
+        const ALIGNED = 0x04;
     }
 }
 
@@ -35,8 +36,8 @@ pub struct BigTuple {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct BigTupleCreateInfo<'a> {
-    aligned: bool,
-    fields: &'a [&'a [u8]],
+    pub aligned: bool,
+    pub fields: &'a [&'a [u8]],
 }
 
 impl<'a> Default for BigTupleCreateInfo<'a> {
@@ -272,15 +273,18 @@ fn validate(bytes: &[u8]) {
 }
 
 impl FromBytesUnchecked for BigTuple {
-    // XXX: Actually this method is checked and safe
     unsafe fn ref_from_bytes_unchecked(bytes: &[u8]) -> &Self {
-        validate(bytes);
+        if cfg!(debug_assertions) {
+            validate(bytes);
+        }
         let tail_len = bytes.len() - 2;
         unsafe { std::mem::transmute((bytes.as_ptr(), tail_len)) }
     }
 
     unsafe fn mut_from_bytes_unchecked(bytes: &mut [u8]) -> &mut Self {
-        validate(bytes);
+        if cfg!(debug_assertions) {
+            validate(bytes);
+        }
         let tail_len = bytes.len() - 2;
         unsafe { std::mem::transmute((bytes.as_mut_ptr(), tail_len)) }
     }
@@ -318,20 +322,42 @@ impl IsPrefixOf for BigTuple {
     }
 }
 
-#[macro_export]
+// XXX: Need a derive macro for this
+impl ToOwned for BigTuple {
+    type Owned = Box<Self>;
+
+    fn to_owned(&self) -> Self::Owned {
+        let src = AsBytes::as_bytes(self);
+        unsafe { Self::box_from_bytes_unchecked(src.to_owned()) }
+    }
+}
+
+pub(crate) fn big_tuple_comparator(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    unsafe {
+        let a = BigTuple::ref_from_bytes_unchecked(a);
+        let b = BigTuple::ref_from_bytes_unchecked(b);
+        Ord::cmp(a, b)
+    }
+}
+
 macro_rules! big_tuple {
     ($($expr:expr),*$(,)?) => {{
         let info = $crate::big_tuple::BigTupleCreateInfo {
-            fields: &[$($expr,)*],
+            fields: &[$($crate::bytes::AsBytes::as_bytes($expr),)*],
             ..Default::default()
         };
         $crate::big_tuple::BigTuple::new(info)
     }};
 }
 
+pub(crate) use big_tuple;
+
 #[cfg(test)]
 mod tests {
-    use crate::bytes::{AsBytes, FromBytesUnchecked};
+    use crate::{
+        bytes::{AsBytes, FromBytesUnchecked},
+        prefix::IsPrefixOf,
+    };
 
     use super::{BigTuple, BigTupleCreateInfo};
 
@@ -448,5 +474,17 @@ mod tests {
         let round_trip = unsafe { BigTuple::ref_from_bytes_unchecked(bytes) };
         assert_eq!(*tuple, *round_trip);
         assert_eq!(*round_trip, *big_tuple!(b"I", b"love", b"you"));
+    }
+
+    #[test]
+    fn test_prefix() {
+        let tuple = big_tuple!(b"I", b"love", b"you");
+        assert!(big_tuple!(b"I", b"love").is_prefix_of(&*tuple));
+        assert!(big_tuple!(b"I", b"lo").is_prefix_of(&*tuple));
+        assert!(big_tuple!(b"I", b"love", b"y").is_prefix_of(&*tuple));
+        assert!(!big_tuple!(b"I", b"lurv", b"you").is_prefix_of(&*tuple));
+        assert!(!big_tuple!(b"I", b"lurv").is_prefix_of(&*tuple));
+        assert!(!big_tuple!(b"I", b"love", b"youuu").is_prefix_of(&*tuple));
+        assert!(!big_tuple!(b"I", b"love", b"you", b"very", b"much").is_prefix_of(&*tuple));
     }
 }

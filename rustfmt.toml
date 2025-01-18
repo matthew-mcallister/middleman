@@ -1,2 +1,4 @@
 imports_granularity = "module"
 match_block_trailing_comma = true
+single_line_if_else_max_width = 99
+single_line_let_else_max_width = 99

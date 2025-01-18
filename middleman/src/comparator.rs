@@ -1,7 +1,6 @@
 /// Implements Ord/PartialOrd for a struct given the list of fields to compare
 /// in lexicographic order. Using Ord as the comparator for a database key is
 /// optional but makes variable-length keys in particular easier to work with.
-#[macro_export]
 macro_rules! make_comparator {
     ($Name:ident, $($field:ident),*$(,)?) => {
         impl std::cmp::Ord for $Name {
@@ -20,3 +19,5 @@ macro_rules! make_comparator {
         }
     };
 }
+
+pub(crate) use make_comparator;

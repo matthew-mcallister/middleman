@@ -4,13 +4,12 @@ use std::sync::Arc;
 use crate::bytes::{AsRawBytes, FromBytesUnchecked};
 use crate::error::DynResult;
 use crate::prefix::IsPrefixOf;
-use crate::types::Db;
+use crate::types::{Db, DbTransaction};
 
-// XXX: Need to enforce K: Ord and implement comparators
 pub struct CfAccessor<
     'db,
-    K: AsRawBytes + ToOwned + 'static,
-    V: FromBytesUnchecked + ToOwned + 'static,
+    K: AsRawBytes + ToOwned + ?Sized + 'static,
+    V: FromBytesUnchecked + ToOwned + ?Sized + 'static,
 > {
     db: &'db Db,
     cf: &'db Arc<rocksdb::BoundColumnFamily<'db>>,
@@ -21,8 +20,11 @@ pub struct CfAccessor<
 type Owned<T> = <T as ToOwned>::Owned;
 type Owned2<T, U> = (<T as ToOwned>::Owned, <U as ToOwned>::Owned);
 
-impl<'db, K: AsRawBytes + ToOwned + 'static, V: FromBytesUnchecked + ToOwned + 'static>
-    CfAccessor<'db, K, V>
+impl<
+        'db,
+        K: FromBytesUnchecked + AsRawBytes + ToOwned + ?Sized + 'static,
+        V: FromBytesUnchecked + AsRawBytes + ToOwned + ?Sized + 'static,
+    > CfAccessor<'db, K, V>
 {
     pub fn new(db: &'db Db, cf: &'db Arc<rocksdb::BoundColumnFamily<'db>>) -> Self {
         Self {
@@ -41,6 +43,18 @@ impl<'db, K: AsRawBytes + ToOwned + 'static, V: FromBytesUnchecked + ToOwned + '
         }
     }
 
+    pub unsafe fn get_txn_unchecked(
+        &self,
+        txn: &DbTransaction,
+        key: &K,
+    ) -> DynResult<Option<Owned<V>>> {
+        let key = unsafe { key.as_bytes_unchecked() };
+        match txn.get_cf(self.cf, key)? {
+            Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes).to_owned())),
+            None => Ok(None),
+        }
+    }
+
     pub fn put(&self, key: &K, value: &V) -> DynResult<()> {
         // This is technically UB; the rocksdb crate requires initialized bytes
         // when uninitialized should be safe
@@ -49,28 +63,33 @@ impl<'db, K: AsRawBytes + ToOwned + 'static, V: FromBytesUnchecked + ToOwned + '
         Ok(self.db.put_cf(self.cf, key, value)?)
     }
 
+    pub fn put_txn(&self, txn: &DbTransaction, key: &K, value: &V) -> DynResult<()> {
+        let key = unsafe { key.as_bytes_unchecked() };
+        let value = unsafe { value.as_bytes_unchecked() };
+        Ok(txn.put_cf(self.cf, key, value)?)
+    }
+
     // TODO: Convert to a streaming iterator
-    pub unsafe fn iter_by_prefix_unchecked<'a, P: AsRawBytes + IsPrefixOf<K> + ?Sized>(
-        &'a self,
-        prefix: &'a P,
-    ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'a {
+    pub unsafe fn iter_by_prefix_unchecked<P: AsRawBytes + IsPrefixOf<K> + 'static>(
+        &self,
+        prefix: P,
+    ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'db {
         let mut raw = self.db.raw_iterator_cf_opt(self.cf, Default::default());
         raw.seek(unsafe { prefix.as_bytes_unchecked() });
 
-        struct Iter<'db, 'prefix, P: IsPrefixOf<T> + ?Sized, T, U> {
+        struct Iter<'db, P: IsPrefixOf<T>, T: ?Sized, U: ?Sized> {
             raw: rocksdb::DBRawIteratorWithThreadMode<'db, Db>,
-            prefix: &'prefix P,
+            prefix: P,
             _t: std::marker::PhantomData<*const T>,
             _u: std::marker::PhantomData<*const U>,
         }
 
         impl<
                 'db,
-                'prefix,
-                P: IsPrefixOf<T> + ?Sized,
-                T: FromBytesUnchecked + ToOwned,
-                U: FromBytesUnchecked + ToOwned,
-            > Iterator for Iter<'db, 'prefix, P, T, U>
+                P: IsPrefixOf<T>,
+                T: FromBytesUnchecked + ToOwned + ?Sized,
+                U: FromBytesUnchecked + ToOwned + ?Sized,
+            > Iterator for Iter<'db, P, T, U>
         {
             type Item = DynResult<Owned2<T, U>>;
 
@@ -104,30 +123,22 @@ impl<'db, K: AsRawBytes + ToOwned + 'static, V: FromBytesUnchecked + ToOwned + '
         }
     }
 
-    pub unsafe fn iter_keys_by_prefix_unchecked<'a, P: AsRawBytes + IsPrefixOf<K> + ?Sized>(
-        &'a self,
-        prefix: &'a P,
-    ) -> impl Iterator<Item = DynResult<Owned<K>>> + 'a {
+    pub unsafe fn iter_keys_by_prefix_unchecked<P: AsRawBytes + IsPrefixOf<K> + 'static>(
+        &self,
+        prefix: P,
+    ) -> impl Iterator<Item = DynResult<Owned<K>>> + 'db {
         let mut raw = self.db.raw_iterator_cf_opt(self.cf, Default::default());
         raw.seek(unsafe { prefix.as_bytes_unchecked() });
 
-        struct Iter<
-            'db,
-            'prefix,
-            P: AsRawBytes + IsPrefixOf<T> + ?Sized,
-            T: FromBytesUnchecked + ToOwned,
-        > {
+        struct Iter<'db, P, T: ?Sized> {
             raw: rocksdb::DBRawIteratorWithThreadMode<'db, Db>,
-            prefix: &'prefix P,
+            prefix: P,
             _t: std::marker::PhantomData<*const T>,
+            _p: std::marker::PhantomData<*const P>,
         }
 
-        impl<
-                'db,
-                'prefix,
-                P: AsRawBytes + IsPrefixOf<T> + ?Sized,
-                T: FromBytesUnchecked + ToOwned,
-            > Iterator for Iter<'db, 'prefix, P, T>
+        impl<'db, P: AsRawBytes + IsPrefixOf<T>, T: FromBytesUnchecked + ToOwned + ?Sized> Iterator
+            for Iter<'db, P, T>
         {
             type Item = DynResult<Owned<T>>;
 
@@ -156,6 +167,7 @@ impl<'db, K: AsRawBytes + ToOwned + 'static, V: FromBytesUnchecked + ToOwned + '
             raw,
             prefix,
             _t: Default::default(),
+            _p: Default::default(),
         }
     }
 }
@@ -220,13 +232,13 @@ mod tests {
         accessor.put(&key3, &value3).unwrap();
 
         let prefix = 1u16.to_be_bytes();
-        let mut iter = unsafe { accessor.iter_by_prefix_unchecked(&prefix[..]) };
+        let mut iter = unsafe { accessor.iter_by_prefix_unchecked(prefix) };
         assert_eq!(iter.next().unwrap().unwrap(), (key1, value1));
         let next = iter.next();
         assert!(next.is_none());
 
         let prefix = 2u16.to_be_bytes();
-        let mut iter = unsafe { accessor.iter_by_prefix_unchecked(&prefix[..]) };
+        let mut iter = unsafe { accessor.iter_by_prefix_unchecked(prefix) };
         assert_eq!(iter.next().unwrap().unwrap(), (key2, value2));
         assert_eq!(iter.next().unwrap().unwrap(), (key3, value3));
         assert!(iter.next().is_none());

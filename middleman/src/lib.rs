@@ -9,12 +9,16 @@ pub mod big_tuple;
 pub mod bytes;
 pub mod comparator;
 pub mod config;
+pub mod delivery;
 pub mod error;
+pub mod event;
 pub mod key;
+pub mod model;
 pub mod prefix;
 #[cfg(test)]
 mod testing;
 pub mod types;
+mod util;
 
 pub struct Application {
     pub(crate) config: Box<Config>,
@@ -45,9 +49,7 @@ use crate::event::{Event, EventTable};
 pub mod accessor;
 pub mod bytes;
 pub mod config;
-pub mod delivery;
 pub mod error;
-pub mod event;
 pub mod key;
 mod model;
 pub mod subscriber;

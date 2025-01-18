@@ -3,11 +3,14 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::bytes::{join_slices, DbSlice};
+use crate::accessor::CfAccessor;
+use crate::big_tuple::{big_tuple, big_tuple_comparator, BigTuple};
+use crate::bytes::AsBytes;
 use crate::error::DynResult;
-use crate::model::VariableSizeModel;
-use crate::types::{Db, DbTransaction, Prefix};
-use crate::{define_key, variable_size_model};
+use crate::key::{packed, BigEndianU64, Packed2};
+use crate::model::big_tuple_struct;
+use crate::types::{Db, DbColumnFamily, DbTransaction};
+use crate::util::get_or_create_cf;
 
 // XXX: Probably just replace with string interning
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -27,35 +30,37 @@ impl std::fmt::Display for ContentType {
     }
 }
 
-variable_size_model! {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C, align(8))]
+struct EventHeader {
+    idempotency_key: Uuid,
+    tag: Uuid,
+    _reserved: [u64; 2],
+}
+
+unsafe impl AsBytes for EventHeader {}
+
+big_tuple_struct! {
     /// Immutable event data structure.
-    #[derive(Debug, PartialEq, Eq)]
     pub struct Event {
-        idempotency_key: Uuid,
-        tag: Uuid,
-        _flags: u32,
-        _reserved: u32,
-        [pub stream: 0]: str,
-        [pub payload: 1]: [u8],
+        header[0]: EventHeader,
+        pub stream[1]: str,
+        pub payload[2]: [u8],
     }
 }
 
 impl Event {
     pub fn content_type(&self) -> ContentType {
-        // XXX: Read content type from flags
+        // TODO: Read content type from flags
         ContentType::Json
     }
 
     pub fn idempotency_key(&self) -> Uuid {
-        self.0.header.idempotency_key
+        self.header().idempotency_key
     }
 
     pub fn tag(&self) -> Uuid {
-        self.0.header.tag
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.as_ref()
+        self.header().tag
     }
 }
 
@@ -99,96 +104,138 @@ impl<'a> EventBuilder<'a> {
     }
 
     pub fn build(&mut self) -> Box<Event> {
-        unsafe {
-            std::mem::transmute(VariableSizeModel::new(
-                EventHeader {
-                    tag: self.tag,
-                    idempotency_key: self.idempotency_key,
-                    _flags: 0,
-                    _reserved: 0,
-                },
-                &[self.stream.as_bytes(), self.payload],
-            ))
-        }
+        Event::new(
+            &EventHeader {
+                tag: self.tag,
+                idempotency_key: self.idempotency_key,
+                _reserved: [0; 2],
+            },
+            self.stream,
+            self.payload,
+        )
     }
 }
 
-define_key!(EventKey {
-    prefix = Prefix::Event,
-    id: u64,
-});
-
-define_key!(EventIdempotencyKey {
-    prefix = Prefix::EventIdempotencyKeyIndex,
-    tag: Uuid,
-    idempotency_key: Uuid,
-});
-
 pub(crate) struct EventTable {
     db: Arc<Db>,
-    // XXX: Have to serialize this to the DB, probably once every 256
-    // increments or so
+    // XXX: Need a persistent autoincrement implementation
     event_sequence_number: AtomicU64,
+    cf: DbColumnFamily,
+    tag_idempotency_index_cf: DbColumnFamily,
+    tag_stream_index_cf: DbColumnFamily,
+}
+
+big_tuple_struct! {
+    pub struct EventStreamIndexKey {
+        tag[0]: Uuid,
+        stream[1]: str,
+        id[2]: BigEndianU64,
+    }
 }
 
 impl EventTable {
-    pub fn new(db: Arc<Db>) -> Self {
-        Self {
-            db,
-            // XXX: Is there any real performance problem if we just implement
-            // autoincrement on top of rocksdb?
-            event_sequence_number: AtomicU64::new(0),
+    pub fn new(db: Arc<Db>) -> DynResult<Self> {
+        unsafe {
+            let cf = get_or_create_cf(&db, "events", &Default::default())?;
+            let tag_idempotency_index_cf =
+                get_or_create_cf(&db, "event_tag_idempotency_key_index", &Default::default())?;
+            let mut options = rocksdb::Options::default();
+            options.set_comparator("big_tuple", Box::new(big_tuple_comparator));
+            let tag_stream_index_cf =
+                get_or_create_cf(&db, "event_tag_stream_index", &Default::default())?;
+            Ok(Self {
+                db,
+                event_sequence_number: AtomicU64::new(0),
+                cf,
+                tag_idempotency_index_cf,
+                tag_stream_index_cf,
+            })
         }
+    }
+
+    fn accessor<'a>(&'a self) -> CfAccessor<'a, BigEndianU64, Event> {
+        CfAccessor::new(&self.db, &self.cf)
+    }
+
+    fn tag_idempotency_index_accessor<'a>(&'a self) -> CfAccessor<'a, Packed2<Uuid, Uuid>, u64> {
+        CfAccessor::new(&self.db, &self.tag_idempotency_index_cf)
+    }
+
+    fn tag_stream_index_accessor<'a>(&'a self) -> CfAccessor<'a, EventStreamIndexKey, ()> {
+        CfAccessor::new(&self.db, &self.tag_stream_index_cf)
     }
 
     /// Creates an event. Event creation is atomic but *not* synchronized,
     /// meaning that events from different sources or partitions are not
     /// guaranteed to be ordered.
+    // XXX: Is it possible to catch write conflicts and report those as a
+    // unique status so the operation will not be retried?
     pub fn create(&self, txn: &DbTransaction<'_>, event: &Event) -> DynResult<u64> {
-        // XXX: Column family!
+        let (tag, idempotency_key) = (event.tag(), event.idempotency_key());
+
+        // Try to fetch existing record by idempotency key
+        let existing_id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
+        if let Some(id) = existing_id {
+            return Ok(id);
+        }
 
         // Create primary record
         let id = self.event_sequence_number.fetch_add(1, Ordering::Relaxed);
-        let key = EventKey::new(id);
-        txn.put(&key, &event)?;
+        self.accessor().put_txn(txn, &id.into(), &event)?;
 
         // Index by tag + idempotency key
-        let key = EventIdempotencyKey::new(event.tag(), event.idempotency_key());
-        txn.put(&key, &id.to_ne_bytes())?;
+        let key = packed!(tag, idempotency_key);
+        self.tag_idempotency_index_accessor()
+            .put_txn(txn, &key, &id)?;
 
         // Index by tag + stream
-        let key = join_slices(&[
-            &[Prefix::EventStreamIndex as u8],
-            event.tag().as_bytes(),
-            event.stream().as_bytes(),
-        ]);
-        txn.put(&*key, &id.to_ne_bytes())?;
+        let key = EventStreamIndexKey::new(&tag, event.stream(), &id.into());
+        self.tag_stream_index_accessor().put_txn(txn, &key, &())?;
 
         Ok(id)
     }
 
-    pub fn get_by_id(&self, id: u64) -> DynResult<Option<DbSlice<'_, Event>>> {
-        let key = EventKey::new(id);
+    pub fn get_by_id(&self, id: u64) -> DynResult<Option<Box<Event>>> {
         // XXX: Is pinning the slice here a performance win? In which cases?
-        let slice = match self.db.get_pinned(&key)? {
-            Some(slice) => slice,
-            None => return Ok(None),
-        };
-        unsafe { Ok(Some(DbSlice::new(slice))) }
+        unsafe { self.accessor().get_unchecked(&id.into()) }
     }
 
     pub fn get_id_by_idempotency_key(
         &self,
+        txn: &DbTransaction,
         tag: Uuid,
         idempotency_key: Uuid,
     ) -> DynResult<Option<u64>> {
-        let key = EventIdempotencyKey::new(tag, idempotency_key);
-        let slice = match self.db.get(&key)? {
-            Some(slice) => slice,
-            None => return Ok(None),
-        };
-        let id = u64::from_ne_bytes(<[u8; 8]>::try_from(&slice[..]).unwrap());
-        Ok(Some(id))
+        let key: Packed2<Uuid, Uuid> = (tag, idempotency_key).into();
+        unsafe {
+            self.tag_idempotency_index_accessor()
+                .get_txn_unchecked(txn, &key)
+        }
+    }
+
+    pub fn get_by_idempotency_key(
+        &self,
+        txn: &DbTransaction,
+        tag: Uuid,
+        idempotency_key: Uuid,
+    ) -> DynResult<Option<(u64, Box<Event>)>> {
+        let id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
+        let Some(id) = id else { return Ok(None) };
+        let Some(event) = self.get_by_id(id)? else { return Ok(None) };
+        Ok(Some((id, event)))
+    }
+
+    pub fn iter_by_stream<'a>(
+        &'a self,
+        tag: Uuid,
+        stream: &str,
+    ) -> impl Iterator<Item = DynResult<Box<Event>>> + 'a {
+        let prefix = big_tuple!(&tag, stream);
+        unsafe {
+            self.tag_stream_index_accessor()
+                .iter_keys_by_prefix_unchecked(prefix)
+                .map(move |key| Ok(self.accessor().get_unchecked(key?.id())?.unwrap()))
+        }
     }
 }
 
@@ -196,9 +243,11 @@ impl EventTable {
 mod tests {
     use std::sync::Arc;
 
+    use rocksdb::DBAccess;
+
     use crate::testing::TestHarness;
 
-    use super::{ContentType, EventBuilder, EventTable};
+    use super::{ContentType, Db, Event, EventBuilder, EventTable};
 
     #[test]
     fn test_builder() {
@@ -217,32 +266,82 @@ mod tests {
         assert_eq!(event.payload(), payload);
     }
 
+    fn testing_event() -> Box<Event> {
+        EventBuilder::new()
+            .content_type(ContentType::Json)
+            .tag(uuid::uuid!("00000000-0000-8000-8000-000000000000"))
+            .stream("asdf")
+            .payload(b"1234321")
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"))
+            .build()
+    }
+
     #[test]
     fn test_create() {
         let mut harness = TestHarness::new();
         let db = harness.db();
 
-        let events = EventTable::new(Arc::clone(&db));
+        let events = EventTable::new(Arc::clone(&db)).unwrap();
+        let event = testing_event();
         let txn = db.transaction();
-        let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
-        let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000001");
-        let event = EventBuilder::new()
-            .content_type(ContentType::Json)
-            .tag(tag)
-            .stream("asdf")
-            .payload(b"1234321")
-            .idempotency_key(idempotency_key)
-            .build();
-        events.create(&txn, &event).unwrap();
+        let id = events.create(&txn, &event).unwrap();
         txn.commit().unwrap();
-
-        let id = events
-            .get_id_by_idempotency_key(tag, idempotency_key)
-            .unwrap()
-            .unwrap();
-        assert_eq!(id, 0);
 
         let event2 = events.get_by_id(id).unwrap().unwrap();
         assert_eq!(&*event, &*event2);
     }
+
+    /// When the same event is committed in two (non-overlapping) transactions,
+    /// the second transaction will find and return the existing event.
+    #[test]
+    fn test_idempotency() {
+        let mut harness = TestHarness::new();
+        let db = harness.db();
+
+        let events = EventTable::new(Arc::clone(&db)).unwrap();
+        let event = testing_event();
+        let txn = db.transaction();
+        let id = events.create(&txn, &event).unwrap();
+        txn.commit().unwrap();
+
+        let txn = db.transaction();
+        let id2 = events.create(&txn, &event).unwrap();
+        txn.commit().unwrap();
+        assert_eq!(id, id2);
+
+        // Also test lookup by idempotency key
+        let txn = db.transaction();
+        let (id2, event2) = events
+            .get_by_idempotency_key(&txn, event.tag(), event.idempotency_key())
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, id2);
+        assert_eq!(event, event2);
+        txn.commit().unwrap();
+    }
+
+    /// When the same event is committed in two (snapshot) transactions,
+    /// one of the transactions will fail.
+    #[test]
+    #[should_panic]
+    fn test_idempotency_conflict() {
+        let mut harness = TestHarness::new();
+        let db = harness.db();
+
+        let events = EventTable::new(Arc::clone(&db)).unwrap();
+
+        let event = testing_event();
+        let mut opts = rocksdb::OptimisticTransactionOptions::new();
+        opts.set_snapshot(true);
+
+        let txn1 = db.transaction_opt(&Default::default(), &opts);
+        let txn2 = db.transaction_opt(&Default::default(), &opts);
+        events.create(&txn1, &event).unwrap();
+        events.create(&txn2, &event).unwrap();
+        txn1.commit().unwrap();
+        txn2.commit().unwrap();
+    }
+
+    #[test]
+    fn test_iter_by_stream() {}
 }

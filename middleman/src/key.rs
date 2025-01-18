@@ -133,7 +133,6 @@ impl_packed_tuple!(Packed4, T, U, V, W);
 impl_packed_tuple!(Packed5, T, U, V, W, X);
 impl_packed_tuple!(Packed6, T, U, V, W, X, Y);
 
-#[macro_export]
 macro_rules! packed {
     ($_0:expr) => {
         $_0
@@ -155,6 +154,8 @@ macro_rules! packed {
     };
 }
 
+pub(crate) use packed;
+
 macro_rules! impl_bytes_as_prefix_of_packed_tuple {
     ($PackedN:ident<$($T:ident),*>) => {
         impl<$($T: AsBytes),*> IsPrefixOf<$PackedN<$($T),*>> for [u8] {
@@ -171,61 +172,79 @@ impl_bytes_as_prefix_of_packed_tuple!(Packed4<T, U, V, W>);
 impl_bytes_as_prefix_of_packed_tuple!(Packed5<T, U, V, W, X>);
 impl_bytes_as_prefix_of_packed_tuple!(Packed6<T, U, V, W, X, Y>);
 
-/*
-macro_rules! impl_packed_tuple_is_prefix_of {
-    ($Lhs:ident, $Rhs:ident; $($index:tt: $T:ident),*; $index_u:tt: $U:ident; $($V:ident),*) => {
-        impl<$($T: Copy + Eq),*, $U: Copy + IsPrefixOf, $($V),*> IsPrefixOf<$Rhs<$($T),*, $U, $($V),*>> for $Lhs<$($T),*, $U> {
-            fn is_prefix_of(&self, other: &$Rhs<$($T),*, $U, $($V),*>) -> bool {
-                true
-                    $(&& {
-                        let lhs = self.$index;
-                        let rhs = other.$index;
-                        lhs == rhs
-                    })*
-                    && {
-                        let lhs = self.$index_u;
-                        let rhs = other.$index_u;
-                        lhs.is_prefix_of(&rhs)
-                    }
+// Implements some boilerplate
+macro_rules! dst_key {
+    (
+        $(#[$($meta:tt)*])*
+        struct $Name:ident {
+            $($field:ident: $FieldTy:ty,)*
+            // The brackets here resolve an ambiguous parse
+            [$tail:ident]: $TailTy:ty$(,)?
+        }
+    ) => {
+        $(#[$($meta)*])*
+        #[repr(packed)]
+        struct $Name {
+            $($field: $FieldTy,)*
+            _tail_start: [u8; 0],
+            $tail: $TailTy,
+        }
+
+        unsafe impl $crate::bytes::AsBytes for $Name {
+            fn as_bytes(this: &Self) -> &[u8] {
+                let start = this as *const Self as *const u8;
+                let tail = $crate::bytes::AsBytes::as_bytes(&this.$tail);
+                let end = tail.as_ptr_range().end;
+                unsafe {
+                    let len = end.offset_from(start);
+                    std::mem::transmute((start, len))
+                }
+            }
+        }
+
+        impl $crate::bytes::AsRawBytes for $Name {
+            fn as_raw_bytes(&self) -> &[std::mem::MaybeUninit<u8>] {
+                unsafe { std::mem::transmute($crate::bytes::AsBytes::as_bytes(self)) }
+            }
+        }
+
+        impl $Name {
+            fn new($($field: $FieldTy,)* $tail: &$TailTy) -> Box<Self> {
+                let mut bytes = Vec::with_capacity(std::mem::size_of::<Uuid>() + $tail.len());
+                $(bytes.extend_from_slice($crate::bytes::AsBytes::as_bytes(&$field));)*
+                bytes.extend_from_slice($crate::bytes::AsBytes::as_bytes($tail));
+                unsafe { Self::box_from_bytes_unchecked(bytes) }
+            }
+        }
+
+        impl $crate::bytes::FromBytesUnchecked for $Name {
+            unsafe fn ref_from_bytes_unchecked(bytes: &[u8]) -> &Self {
+                assert!(bytes.len() >= std::mem::offset_of!(Self, _tail_start));
+                let len = bytes.len() - std::mem::offset_of!(Self, _tail_start);
+                let ptr = bytes.as_ptr();
+                unsafe { std::mem::transmute((ptr, len)) }
+            }
+
+            unsafe fn mut_from_bytes_unchecked(bytes: &mut [u8]) -> &mut Self {
+                assert!(bytes.len() >= std::mem::offset_of!(Self, _tail_start));
+                let len = bytes.len() - std::mem::offset_of!(Self, _tail_start);
+                let ptr = bytes.as_mut_ptr();
+                unsafe { std::mem::transmute((ptr, len)) }
+            }
+        }
+
+        impl ToOwned for $Name {
+            type Owned = Box<Self>;
+
+            fn to_owned(&self) -> Self::Owned {
+                let src = $crate::bytes::AsBytes::as_bytes(self);
+                unsafe { <Self as $crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(src.to_owned()) }
             }
         }
     };
-    ($Tuple:ident; $T:ident, $($U:ident),*) => {
-        impl<$T: Copy + IsPrefixOf, $($U),*> IsPrefixOf<$Tuple<$T, $($U),*>> for $T {
-            fn is_prefix_of(&self, other: &$Tuple<$T, $($U),*>) -> bool {
-                let rhs = other.0;
-                self.is_prefix_of(&rhs)
-            }
-        }
-    }
 }
 
-impl_packed_tuple_is_prefix_of!(Packed2; T, U);
-impl_packed_tuple_is_prefix_of!(Packed3; T, U, V);
-impl_packed_tuple_is_prefix_of!(Packed4; T, U, V, W);
-impl_packed_tuple_is_prefix_of!(Packed5; T, U, V, W, X);
-impl_packed_tuple_is_prefix_of!(Packed6; T, U, V, W, X, Y);
-
-impl_packed_tuple_is_prefix_of!(Packed2, Packed2; 0: T; 1: U;);
-impl_packed_tuple_is_prefix_of!(Packed2, Packed3; 0: T; 1: U; V);
-impl_packed_tuple_is_prefix_of!(Packed2, Packed4; 0: T; 1: U; V, W);
-impl_packed_tuple_is_prefix_of!(Packed2, Packed5; 0: T; 1: U; V, W, X);
-impl_packed_tuple_is_prefix_of!(Packed2, Packed6; 0: T; 1: U; V, W, X, Y);
-
-impl_packed_tuple_is_prefix_of!(Packed3, Packed3; 0: T, 1: U; 2: V;);
-impl_packed_tuple_is_prefix_of!(Packed3, Packed4; 0: T, 1: U; 2: V; W);
-impl_packed_tuple_is_prefix_of!(Packed3, Packed5; 0: T, 1: U; 2: V; W, X);
-impl_packed_tuple_is_prefix_of!(Packed3, Packed6; 0: T, 1: U; 2: V; W, X, Y);
-
-impl_packed_tuple_is_prefix_of!(Packed4, Packed4; 0: T, 1: U, 2: V; 3: W;);
-impl_packed_tuple_is_prefix_of!(Packed4, Packed5; 0: T, 1: U, 2: V; 3: W; X);
-impl_packed_tuple_is_prefix_of!(Packed4, Packed6; 0: T, 1: U, 2: V; 3: W; X, Y);
-
-impl_packed_tuple_is_prefix_of!(Packed5, Packed5; 0: T, 1: U, 2: V, 3: W; 4: X;);
-impl_packed_tuple_is_prefix_of!(Packed5, Packed6; 0: T, 1: U, 2: V, 3: W; 4: X; Y);
-
-impl_packed_tuple_is_prefix_of!(Packed6, Packed6; 0: T, 1: U, 2: V, 3: W, 4: X; 5: Y;);
-*/
+pub(crate) use dst_key;
 
 #[cfg(test)]
 mod tests {
