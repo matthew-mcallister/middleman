@@ -64,7 +64,7 @@ impl Event {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct EventBuilder<'a> {
     idempotency_key: Uuid,
     tag: Uuid,
@@ -141,8 +141,7 @@ impl EventTable {
                 get_or_create_cf(&db, "event_tag_idempotency_key_index", &Default::default())?;
             let mut options = rocksdb::Options::default();
             options.set_comparator("big_tuple", Box::new(big_tuple_comparator));
-            let tag_stream_index_cf =
-                get_or_create_cf(&db, "event_tag_stream_index", &Default::default())?;
+            let tag_stream_index_cf = get_or_create_cf(&db, "event_tag_stream_index", &options)?;
             Ok(Self {
                 db,
                 event_sequence_number: AtomicU64::new(0),
@@ -169,7 +168,7 @@ impl EventTable {
     /// meaning that events from different sources or partitions are not
     /// guaranteed to be ordered.
     // XXX: Is it possible to catch write conflicts and report those as a
-    // unique status so the operation will not be retried?
+    // unique status so the operation need not be retried?
     pub fn create(&self, txn: &DbTransaction<'_>, event: &Event) -> DynResult<u64> {
         let (tag, idempotency_key) = (event.tag(), event.idempotency_key());
 
@@ -229,12 +228,16 @@ impl EventTable {
         &'a self,
         tag: Uuid,
         stream: &str,
-    ) -> impl Iterator<Item = DynResult<Box<Event>>> + 'a {
+    ) -> impl Iterator<Item = DynResult<(u64, Box<Event>)>> + 'a {
         let prefix = big_tuple!(&tag, stream);
         unsafe {
             self.tag_stream_index_accessor()
-                .iter_keys_by_prefix_unchecked(prefix)
-                .map(move |key| Ok(self.accessor().get_unchecked(key?.id())?.unwrap()))
+                .iter_keys_by_prefix_unchecked::<BigTuple>(prefix)
+                .map(move |key| {
+                    let id = *key?.id();
+                    let event = self.accessor().get_unchecked(&id)?.unwrap();
+                    Ok((id.into(), event))
+                })
         }
     }
 }
@@ -243,11 +246,9 @@ impl EventTable {
 mod tests {
     use std::sync::Arc;
 
-    use rocksdb::DBAccess;
-
     use crate::testing::TestHarness;
 
-    use super::{ContentType, Db, Event, EventBuilder, EventTable};
+    use super::{ContentType, Event, EventBuilder, EventTable};
 
     #[test]
     fn test_builder() {
@@ -343,5 +344,48 @@ mod tests {
     }
 
     #[test]
-    fn test_iter_by_stream() {}
+    fn test_iter_by_stream() {
+        let mut harness = TestHarness::new();
+        let db = harness.db();
+        let events = EventTable::new(Arc::clone(&db)).unwrap();
+
+        let txn = db.transaction();
+        let mut base = EventBuilder::new();
+        let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
+        base.content_type(ContentType::Json).tag(tag);
+        let event1 = base
+            .clone()
+            .stream("stream1")
+            .payload(b"1")
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"))
+            .build();
+        let id1 = events.create(&txn, &event1).unwrap();
+        let event2 = base
+            .clone()
+            .stream("stream0")
+            .payload(b"2")
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000002"))
+            .build();
+        let _id2 = events.create(&txn, &event2).unwrap();
+        let event3 = base
+            .clone()
+            .stream("stream1")
+            .payload(b"3")
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000003"))
+            .build();
+        let id3 = events.create(&txn, &event3).unwrap();
+        let event4 = base
+            .clone()
+            .stream("strm2")
+            .payload(b"4")
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000004"))
+            .build();
+        let _id4 = events.create(&txn, &event4).unwrap();
+        txn.commit().unwrap();
+
+        let mut iter = events.iter_by_stream(tag, "stream1");
+        assert_eq!(iter.next().unwrap().unwrap(), (id1, event1));
+        assert_eq!(iter.next().unwrap().unwrap(), (id3, event3));
+        assert!(iter.next().is_none());
+    }
 }

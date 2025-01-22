@@ -32,13 +32,6 @@ impl IsPrefixOf for str {
     }
 }
 
-impl<P: IsPrefixOf<T> + ?Sized, T: ?Sized> IsPrefixOf<T> for Box<P> {
-    #[inline(always)]
-    fn is_prefix_of(&self, other: &T) -> bool {
-        (**self).is_prefix_of(other)
-    }
-}
-
 impl<T, U, const N: usize> IsPrefixOf<U> for [T; N]
 where
     [T]: IsPrefixOf<U>,
