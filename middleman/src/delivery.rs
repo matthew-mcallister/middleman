@@ -59,6 +59,7 @@ impl From<chrono::DateTime<Utc>> for DateTime {
 pub struct Delivery {
     subscriber_id: Uuid,
     event_id: u64,
+    _reserved: [u64; 2],
     next_attempt: DateTime,
     attempts_made: u32,
 }
@@ -91,6 +92,7 @@ impl DeliveryTable {
             event_id,
             attempts_made: 0,
             next_attempt: Utc::now().into(),
+            _reserved: [0; 2],
         };
         self.accessor()
             .put_txn(&txn, &(subscriber_id, event_id).into(), &delivery)?;

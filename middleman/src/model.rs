@@ -78,7 +78,7 @@ macro_rules! big_tuple_struct {
 
         impl std::cmp::Eq for $Name {}
 
-        impl $crate::prefix::IsPrefixOf<$Name> for BigTuple {
+        impl $crate::prefix::IsPrefixOf<$Name> for $crate::big_tuple::BigTuple {
             fn is_prefix_of(&self, key: &$Name) -> bool {
                 self.is_prefix_of(&key.0)
             }

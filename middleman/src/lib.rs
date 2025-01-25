@@ -15,6 +15,7 @@ pub mod event;
 pub mod key;
 pub mod model;
 pub mod prefix;
+pub mod subscriber;
 #[cfg(test)]
 mod testing;
 pub mod types;
@@ -52,7 +53,6 @@ pub mod config;
 pub mod error;
 pub mod key;
 mod model;
-pub mod subscriber;
 pub mod types;
 
 pub struct Application {

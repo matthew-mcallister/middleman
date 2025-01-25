@@ -2,6 +2,8 @@ use std::borrow::Borrow;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use rocksdb::DBAccess;
+
 use crate::bytes::{AsRawBytes, FromBytesUnchecked};
 use crate::error::DynResult;
 use crate::prefix::IsPrefixOf;
@@ -20,6 +22,82 @@ pub struct CfAccessor<
 
 type Owned<T> = <T as ToOwned>::Owned;
 type Owned2<T, U> = (<T as ToOwned>::Owned, <U as ToOwned>::Owned);
+
+struct KeyValueIter<'db, D: rocksdb::DBAccess, P: ToOwned + ?Sized, T: ?Sized, U: ?Sized> {
+    raw: rocksdb::DBRawIteratorWithThreadMode<'db, D>,
+    prefix: Owned<P>,
+    _t: std::marker::PhantomData<*const T>,
+    _u: std::marker::PhantomData<*const U>,
+}
+
+impl<
+        'db,
+        D: rocksdb::DBAccess,
+        P: ToOwned + IsPrefixOf<T> + ?Sized,
+        T: FromBytesUnchecked + ToOwned + ?Sized,
+        U: FromBytesUnchecked + ToOwned + ?Sized,
+    > Iterator for KeyValueIter<'db, D, P, T, U>
+{
+    type Item = DynResult<Owned2<T, U>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.raw.valid() {
+            match self.raw.status() {
+                Ok(_) => return None,
+                Err(e) => return Some(Err(e.into())),
+            }
+        }
+
+        let key = unsafe { T::ref_from_bytes_unchecked(self.raw.key()?) };
+        if !self.prefix.borrow().is_prefix_of(key) {
+            return None;
+        }
+
+        let key = key.to_owned();
+        let value = unsafe { U::ref_from_bytes_unchecked(self.raw.value()?).to_owned() };
+
+        self.raw.next();
+
+        Some(Ok((key, value)))
+    }
+}
+
+struct KeyIter<'db, D: DBAccess, P: ToOwned + ?Sized, T: ?Sized> {
+    raw: rocksdb::DBRawIteratorWithThreadMode<'db, D>,
+    prefix: Owned<P>,
+    _t: std::marker::PhantomData<*const T>,
+    _p: std::marker::PhantomData<*const P>,
+}
+
+impl<
+        'db,
+        D: DBAccess,
+        P: ToOwned + IsPrefixOf<T> + ?Sized,
+        T: FromBytesUnchecked + ToOwned + ?Sized,
+    > Iterator for KeyIter<'db, D, P, T>
+{
+    type Item = DynResult<Owned<T>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.raw.valid() {
+            match self.raw.status() {
+                Ok(_) => return None,
+                Err(e) => return Some(Err(e.into())),
+            }
+        }
+
+        let key = unsafe { T::ref_from_bytes_unchecked(self.raw.key()?) };
+        if !self.prefix.borrow().is_prefix_of(key) {
+            return None;
+        }
+
+        let key = key.to_owned();
+
+        self.raw.next();
+
+        Some(Ok(key))
+    }
+}
 
 impl<
         'db,
@@ -86,45 +164,26 @@ impl<
         let mut raw = self.db.raw_iterator_cf(self.cf);
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
-        struct Iter<'db, P: ToOwned + ?Sized, T: ?Sized, U: ?Sized> {
-            raw: rocksdb::DBRawIteratorWithThreadMode<'db, Db>,
-            prefix: Owned<P>,
-            _t: std::marker::PhantomData<*const T>,
-            _u: std::marker::PhantomData<*const U>,
+        KeyValueIter::<Db, P, K, V> {
+            raw,
+            prefix,
+            _t: Default::default(),
+            _u: Default::default(),
         }
+    }
 
-        impl<
-                'db,
-                P: ToOwned + IsPrefixOf<T> + ?Sized,
-                T: FromBytesUnchecked + ToOwned + ?Sized,
-                U: FromBytesUnchecked + ToOwned + ?Sized,
-            > Iterator for Iter<'db, P, T, U>
-        {
-            type Item = DynResult<Owned2<T, U>>;
+    pub unsafe fn iter_by_prefix_txn_unchecked<
+        'txn,
+        P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
+    >(
+        &self,
+        txn: &'txn DbTransaction<'txn>,
+        prefix: Owned<P>,
+    ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'txn {
+        let mut raw = txn.raw_iterator_cf(self.cf);
+        raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
-            fn next(&mut self) -> Option<Self::Item> {
-                if !self.raw.valid() {
-                    match self.raw.status() {
-                        Ok(_) => return None,
-                        Err(e) => return Some(Err(e.into())),
-                    }
-                }
-
-                let key = unsafe { T::ref_from_bytes_unchecked(self.raw.key()?) };
-                if !self.prefix.borrow().is_prefix_of(key) {
-                    return None;
-                }
-
-                let key = key.to_owned();
-                let value = unsafe { U::ref_from_bytes_unchecked(self.raw.value()?).to_owned() };
-
-                self.raw.next();
-
-                Some(Ok((key, value)))
-            }
-        }
-
-        Iter::<P, K, V> {
+        KeyValueIter::<DbTransaction<'txn>, P, K, V> {
             raw,
             prefix,
             _t: Default::default(),
@@ -141,43 +200,26 @@ impl<
         let mut raw = self.db.raw_iterator_cf(self.cf);
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
-        struct Iter<'db, P: ToOwned + ?Sized, T: ?Sized> {
-            raw: rocksdb::DBRawIteratorWithThreadMode<'db, Db>,
-            prefix: Owned<P>,
-            _t: std::marker::PhantomData<*const T>,
-            _p: std::marker::PhantomData<*const P>,
+        KeyIter::<Db, P, K> {
+            raw,
+            prefix,
+            _t: Default::default(),
+            _p: Default::default(),
         }
+    }
 
-        impl<
-                'db,
-                P: ToOwned + IsPrefixOf<T> + ?Sized,
-                T: FromBytesUnchecked + ToOwned + ?Sized,
-            > Iterator for Iter<'db, P, T>
-        {
-            type Item = DynResult<Owned<T>>;
+    pub unsafe fn iter_keys_by_prefix_txn_unchecked<
+        'txn,
+        P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
+    >(
+        &self,
+        txn: &'txn DbTransaction<'txn>,
+        prefix: Owned<P>,
+    ) -> impl Iterator<Item = DynResult<Owned<K>>> + 'txn {
+        let mut raw = txn.raw_iterator_cf(self.cf);
+        raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
-            fn next(&mut self) -> Option<Self::Item> {
-                if !self.raw.valid() {
-                    match self.raw.status() {
-                        Ok(_) => return None,
-                        Err(e) => return Some(Err(e.into())),
-                    }
-                }
-
-                let key = unsafe { T::ref_from_bytes_unchecked(self.raw.key()?) };
-                if !self.prefix.borrow().is_prefix_of(key) {
-                    return None;
-                }
-
-                let key = key.to_owned();
-
-                self.raw.next();
-
-                Some(Ok(key))
-            }
-        }
-
-        Iter::<P, K> {
+        KeyIter::<DbTransaction<'txn>, P, K> {
             raw,
             prefix,
             _t: Default::default(),

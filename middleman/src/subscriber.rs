@@ -1,99 +1,101 @@
+use std::sync::Arc;
+
 use regex::Regex;
 use url::Url;
 use uuid::Uuid;
 
-use crate::bytes::ByteCast;
-use crate::delivery::Delivery;
+use crate::accessor::CfAccessor;
+use crate::bytes::AsBytes;
+use crate::delivery::DeliveryTable;
 use crate::error::DynResult;
 use crate::event::Event;
-use crate::model::VariableSizeModel;
-use crate::types::{DbTransaction, Prefix};
-use crate::{define_key, variable_size_model};
+use crate::key::{packed, Packed2};
+use crate::model::big_tuple_struct;
+use crate::types::{Db, DbColumnFamily, DbTransaction};
+use crate::util::get_or_create_cf;
 
-variable_size_model! {
-    /// Subscriber that receives events.
-    #[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct SubscriberHeader {
+    tag: Uuid,
+    id: Uuid,
+    _reserved: [u64; 2],
+}
+
+unsafe impl AsBytes for SubscriberHeader {}
+
+big_tuple_struct! {
+    /// Subscriber that receives events or notifications.
     pub struct Subscriber {
-        tag: Uuid,
-        _flags: u32,
-        _reserved: u32,
-        [pub destination_url: 0]: str,
-        [pub stream_regex: 1]: str,
+        header[0]: SubscriberHeader,
+        destination_url[1]: str,
+        stream_regex[2]: str,
     }
 }
 
-define_key!(SubscriberKey {
-    prefix = Prefix::Subscriber,
-    id: Uuid,
-});
+pub(crate) struct SubscriberTable {
+    db: Arc<Db>,
+    cf: DbColumnFamily,
+}
 
-define_key!(SubscriberTagIndexKey {
-    prefix = Prefix::SubscriberTagIndex,
-    tag: Uuid,
-    id: Uuid,
-});
-
-define_key!(SubscriberTagPrefix {
-    prefix = Prefix::SubscriberTagIndex,
-    tag: Uuid,
-});
+pub(crate) type SubscriberKey = Packed2<Uuid, Uuid>;
 
 impl Subscriber {
     pub fn tag(&self) -> Uuid {
-        self.0.header.tag
+        self.header().tag
     }
 
-    pub fn create(txn: &DbTransaction, subscriber: &Subscriber) -> DynResult<Uuid> {
-        let id = Uuid::new_v4();
-        let key = SubscriberKey::new(id);
-        txn.put(key, subscriber)?;
-        let key = SubscriberTagIndexKey::new(subscriber.tag(), id);
-        txn.put(key, &[])?;
-        Ok(id)
+    pub fn id(&self) -> Uuid {
+        self.header().id
+    }
+}
+
+impl SubscriberTable {
+    pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
+        let cf = unsafe { get_or_create_cf(&db, "deliveries", &Default::default())? };
+        Ok(Self { db, cf })
     }
 
-    pub fn get_by_id(txn: &DbTransaction, id: Uuid) -> Result<Option<Box<Self>>, rocksdb::Error> {
-        let key = SubscriberKey::new(id);
-        let bytes = txn.get(key)?;
-        if let Some(bytes) = bytes {
-            unsafe { Ok(Some(ByteCast::from_bytes_owned(bytes))) }
-        } else {
-            Ok(None)
-        }
+    fn accessor<'a>(&'a self) -> CfAccessor<'a, SubscriberKey, Subscriber> {
+        CfAccessor::new(&self.db, &self.cf)
+    }
+
+    pub fn create(&self, txn: &DbTransaction, subscriber: &Subscriber) -> DynResult<()> {
+        let key = packed!(subscriber.tag(), subscriber.id());
+        self.accessor().put_txn(txn, &key, subscriber)?;
+        Ok(())
+    }
+
+    pub fn get(&self, tag: Uuid, id: Uuid) -> DynResult<Option<Box<Subscriber>>> {
+        let key = packed!(tag, id);
+        unsafe { self.accessor().get_unchecked(&key) }
     }
 
     /// Iterates over subscribers by tag.
-    pub fn iter_subscribers<'a>(
-        txn: &'a DbTransaction,
+    pub fn iter_by_tag<'txn>(
+        &self,
+        txn: &'txn DbTransaction<'txn>,
         tag: Uuid,
-    ) -> impl Iterator<Item = Result<(Uuid, Box<Self>), rocksdb::Error>> + 'a {
-        let prefix = SubscriberTagPrefix::new(tag);
-        txn.prefix_iterator(prefix).map(|item| {
-            let (bytes, _) = item?;
-            let key: SubscriberTagIndexKey =
-                unsafe { *(bytes.as_ptr() as *const SubscriberTagIndexKey) };
-            let id = key.id;
-
-            let subscriber = Self::get_by_id(txn, id)?.unwrap();
-            Ok((id, subscriber))
-        })
+    ) -> impl Iterator<Item = DynResult<Box<Subscriber>>> + 'txn {
+        unsafe {
+            self.accessor()
+                .iter_by_prefix_txn_unchecked::<[u8; 16]>(txn, *tag.as_bytes())
+                .map(|e| e.map(|(_, v)| v))
+        }
     }
 
     /// Iterates over all subscribers of the given stream. This may be slow if
     /// there are a lot of subscribers for a given tag.
-    pub fn iter_stream_subscribers<'a>(
-        txn: &'a DbTransaction,
+    pub fn iter_by_stream<'a>(
+        &self,
+        txn: &'a DbTransaction<'a>,
         tag: Uuid,
         stream: &'a str,
-    ) -> impl Iterator<Item = Result<(Uuid, Box<Self>), rocksdb::Error>> + 'a {
-        Self::iter_subscribers(txn, tag).filter_map(|item| {
-            let (id, subscriber) = match item {
-                Ok(x) => x,
-                Err(e) => return Some(Err(e)),
-            };
+    ) -> impl Iterator<Item = DynResult<Box<Subscriber>>> + 'a {
+        self.iter_by_tag(txn, tag).filter_map(|item| {
+            let Ok(subscriber) = item else { return Some(item) };
             let regex = Regex::new(subscriber.stream_regex()).unwrap();
             if regex.is_match(stream) {
-                Some(Ok((id, subscriber)))
+                Some(Ok(subscriber))
             } else {
                 None
             }
@@ -101,14 +103,15 @@ impl Subscriber {
     }
 
     pub fn create_deliveries_for_event(
+        &self,
         txn: &DbTransaction,
+        deliveries: &DeliveryTable,
         event_id: u64,
         event: &Event,
     ) -> DynResult<()> {
-        let subscribers = Subscriber::iter_stream_subscribers(txn, event.tag(), event.stream());
-        for item in subscribers {
-            let (id, _) = item?;
-            Delivery::create(txn, id, event_id)?;
+        let subscribers = self.iter_by_stream(txn, event.tag(), event.stream());
+        for subscriber in subscribers {
+            deliveries.create(txn, subscriber?.id(), event_id)?;
         }
         Ok(())
     }
@@ -117,6 +120,7 @@ impl Subscriber {
 #[derive(Debug, Default)]
 pub struct SubscriberBuilder {
     tag: Uuid,
+    id: Uuid,
     destination_url: Option<Url>,
     stream_regex: Option<Regex>,
 }
@@ -128,6 +132,11 @@ impl SubscriberBuilder {
 
     pub fn tag(&mut self, tag: Uuid) -> &mut Self {
         self.tag = tag;
+        self
+    }
+
+    pub fn id(&mut self, id: Uuid) -> &mut Self {
+        self.id = id;
         self
     }
 
@@ -149,22 +158,17 @@ impl SubscriberBuilder {
         if destination_url.scheme() != "http" && destination_url.scheme() != "https" {
             return Err("Invalid subscriber URL".into());
         }
-
         let stream_regex = self.stream_regex.take().ok_or("Missing subscriber regex")?;
-
-        let subscriber = VariableSizeModel::new(
-            SubscriberHeader {
-                tag: self.tag,
-                _reserved: 0,
-                _flags: 0,
-            },
-            &[
-                destination_url.as_ref().as_bytes(),
-                stream_regex.as_str().as_bytes(),
-            ],
-        );
-
-        Ok(subscriber.into())
+        let header = SubscriberHeader {
+            tag: self.tag,
+            id: self.id,
+            _reserved: [0; 2],
+        };
+        Ok(Subscriber::new(
+            &header,
+            destination_url.as_str(),
+            stream_regex.as_str(),
+        ))
     }
 }
 
@@ -175,7 +179,7 @@ mod tests {
     use regex::Regex;
     use url::Url;
 
-    use crate::subscriber::Subscriber;
+    use crate::subscriber::SubscriberTable;
     use crate::testing::TestHarness;
 
     use super::SubscriberBuilder;
@@ -185,10 +189,12 @@ mod tests {
         let url = "https://example.com/webhook";
         let regex = "^hello";
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
+        let id = uuid::uuid!("00000000-0000-8000-8000-000000000001");
         let subscriber = SubscriberBuilder::new()
             .tag(tag)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new(regex).unwrap())
+            .id(id)
             .build()
             .unwrap();
         assert_eq!(subscriber.tag(), tag);
@@ -197,14 +203,11 @@ mod tests {
 
         let mut harness = TestHarness::new();
         let db = Arc::new(harness.db());
+        let subscribers = SubscriberTable::new(Arc::clone(&db)).unwrap();
         let txn = db.transaction();
-        let id = Subscriber::create(&txn, &subscriber).unwrap();
+        subscribers.create(&txn, &subscriber).unwrap();
         txn.commit().unwrap();
 
-        let txn = db.transaction();
-        assert_eq!(
-            &Subscriber::get_by_id(&txn, id).unwrap().unwrap(),
-            &subscriber
-        );
+        assert_eq!(subscribers.get(tag, id).unwrap().unwrap(), subscriber);
     }
 }

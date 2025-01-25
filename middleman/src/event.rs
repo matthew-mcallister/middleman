@@ -30,6 +30,7 @@ impl std::fmt::Display for ContentType {
     }
 }
 
+// TODO: ID should probably be stored on the event
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C, align(8))]
 struct EventHeader {
@@ -194,7 +195,7 @@ impl EventTable {
         Ok(id)
     }
 
-    pub fn get_by_id(&self, id: u64) -> DynResult<Option<Box<Event>>> {
+    pub fn get(&self, id: u64) -> DynResult<Option<Box<Event>>> {
         // XXX: Is pinning the slice here a performance win? In which cases?
         unsafe { self.accessor().get_unchecked(&id.into()) }
     }
@@ -220,7 +221,7 @@ impl EventTable {
     ) -> DynResult<Option<(u64, Box<Event>)>> {
         let id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
         let Some(id) = id else { return Ok(None) };
-        let Some(event) = self.get_by_id(id)? else { return Ok(None) };
+        let Some(event) = self.get(id)? else { return Ok(None) };
         Ok(Some((id, event)))
     }
 
@@ -288,7 +289,7 @@ mod tests {
         let id = events.create(&txn, &event).unwrap();
         txn.commit().unwrap();
 
-        let event2 = events.get_by_id(id).unwrap().unwrap();
+        let event2 = events.get(id).unwrap().unwrap();
         assert_eq!(&*event, &*event2);
     }
 
