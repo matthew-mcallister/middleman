@@ -118,12 +118,13 @@ impl<'a> EventBuilder<'a> {
 }
 
 pub(crate) struct EventTable {
-    db: Arc<Db>,
     // XXX: Need a persistent autoincrement implementation
     event_sequence_number: AtomicU64,
     cf: DbColumnFamily,
     tag_idempotency_index_cf: DbColumnFamily,
     tag_stream_index_cf: DbColumnFamily,
+    // XXX: Drop last
+    db: Arc<Db>,
 }
 
 big_tuple_struct! {

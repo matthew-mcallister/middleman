@@ -67,8 +67,9 @@ pub struct Delivery {
 unsafe impl AsBytes for Delivery {}
 
 pub struct DeliveryTable {
-    db: Arc<Db>,
     cf: DbColumnFamily,
+    // XXX: Drop last
+    db: Arc<Db>,
 }
 
 impl DeliveryTable {

@@ -48,12 +48,16 @@ impl<
             }
         }
 
+        // FIXME: There should be a static assertion that T has alignment 1
+        // because we are casting unaligned memory.
         let key = unsafe { T::ref_from_bytes_unchecked(self.raw.key()?) };
         if !self.prefix.borrow().is_prefix_of(key) {
             return None;
         }
 
         let key = key.to_owned();
+        // FIXME: We unfortunately cannot use ToOwned here because the source
+        // bytes are unaligned. We need a ToOwnedUnaligned trait, basically.
         let value = unsafe { U::ref_from_bytes_unchecked(self.raw.value()?).to_owned() };
 
         self.raw.next();

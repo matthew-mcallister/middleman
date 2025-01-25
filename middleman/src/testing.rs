@@ -8,6 +8,7 @@ use crate::Application;
 #[derive(Default)]
 pub(crate) struct TestHarness {
     db_dir: Option<tempfile::TempDir>,
+    db: Option<Arc<Db>>,
     application: Option<Application>,
 }
 
@@ -34,7 +35,18 @@ impl TestHarness {
         self.db_dir.as_ref().map(|d| d.path()).unwrap()
     }
 
+    /// Minimal DB instance for low-level tests
+    pub(crate) fn db(&mut self) -> &Arc<Db> {
+        assert!(!self.application.is_some());
+        let db_dir = self.db_dir().to_owned();
+        let mut options = rocksdb::Options::default();
+        options.create_if_missing(true);
+        self.db = Some(Arc::new(Db::open(&options, &db_dir).unwrap()));
+        self.db.as_ref().unwrap()
+    }
+
     pub(crate) fn application(&mut self) -> &mut Application {
+        assert!(!self.db.is_some());
         if self.application.is_some() {
             return self.application.as_mut().unwrap();
         }
@@ -44,9 +56,5 @@ impl TestHarness {
         self.application = Some(Application::new(config).unwrap());
 
         self.application.as_mut().unwrap()
-    }
-
-    pub(crate) fn db(&mut self) -> &Arc<Db> {
-        &self.application().db
     }
 }

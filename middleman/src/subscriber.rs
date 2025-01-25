@@ -6,9 +6,7 @@ use uuid::Uuid;
 
 use crate::accessor::CfAccessor;
 use crate::bytes::AsBytes;
-use crate::delivery::DeliveryTable;
 use crate::error::DynResult;
-use crate::event::Event;
 use crate::key::{packed, Packed2};
 use crate::model::big_tuple_struct;
 use crate::types::{Db, DbColumnFamily, DbTransaction};
@@ -33,8 +31,9 @@ big_tuple_struct! {
 }
 
 pub(crate) struct SubscriberTable {
-    db: Arc<Db>,
     cf: DbColumnFamily,
+    // XXX: Drop last
+    db: Arc<Db>,
 }
 
 pub(crate) type SubscriberKey = Packed2<Uuid, Uuid>;
@@ -51,7 +50,7 @@ impl Subscriber {
 
 impl SubscriberTable {
     pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
-        let cf = unsafe { get_or_create_cf(&db, "deliveries", &Default::default())? };
+        let cf = unsafe { get_or_create_cf(&db, "subscribers", &Default::default())? };
         Ok(Self { db, cf })
     }
 
@@ -100,20 +99,6 @@ impl SubscriberTable {
                 None
             }
         })
-    }
-
-    pub fn create_deliveries_for_event(
-        &self,
-        txn: &DbTransaction,
-        deliveries: &DeliveryTable,
-        event_id: u64,
-        event: &Event,
-    ) -> DynResult<()> {
-        let subscribers = self.iter_by_stream(txn, event.tag(), event.stream());
-        for subscriber in subscribers {
-            deliveries.create(txn, subscriber?.id(), event_id)?;
-        }
-        Ok(())
     }
 }
 
@@ -202,7 +187,7 @@ mod tests {
         assert_eq!(subscriber.destination_url(), url);
 
         let mut harness = TestHarness::new();
-        let db = Arc::new(harness.db());
+        let db = harness.db();
         let subscribers = SubscriberTable::new(Arc::clone(&db)).unwrap();
         let txn = db.transaction();
         subscribers.create(&txn, &subscriber).unwrap();
