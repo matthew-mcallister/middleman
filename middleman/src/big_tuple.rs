@@ -1,6 +1,7 @@
 use std::mem::MaybeUninit;
 
 use bitflags::bitflags;
+use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 
 use crate::{
     bytes::{AsBytes, AsRawBytes, FromBytesUnchecked},
@@ -26,6 +27,7 @@ bitflags! {
 /// `BigTuples` come with multiple layout options. Fields may be packed or
 /// aligned. If fields are short enough, then 16-bit field offsets will be used
 /// instead of 32-bit offsets.
+#[derive(ToOwned, OwnedFromBytesUnchecked)]
 #[repr(align(8))]
 pub struct BigTuple {
     tail: [u8],
@@ -35,6 +37,7 @@ pub struct BigTuple {
 /// give us aligned memory to work with. Ideally we would be using a storage
 /// engine that *does* guarantee aligned memory, but in absentia, we can cut
 /// down on extra copies by working with unaligned memory directly.
+#[derive(ToOwned, OwnedFromBytesUnchecked)]
 #[repr(transparent)]
 pub struct BigTupleUnaligned {
     tail: [u8],
@@ -194,16 +197,6 @@ macro_rules! common_impl {
                     && self
                         .get(self.len() - 1)
                         .is_prefix_of(other.get(self.len() - 1))
-            }
-        }
-
-        // XXX: Need a derive macro for this
-        impl ToOwned for $Name {
-            type Owned = Box<Self>;
-
-            fn to_owned(&self) -> Self::Owned {
-                let src = AsBytes::as_bytes(self);
-                unsafe { Self::box_from_bytes_unchecked(src.to_owned()) }
             }
         }
     };

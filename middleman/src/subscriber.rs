@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use regex::Regex;
 use url::Url;
 use uuid::Uuid;
@@ -104,8 +105,8 @@ impl SubscriberTable {
 
 #[derive(Debug, Default)]
 pub struct SubscriberBuilder {
-    tag: Uuid,
-    id: Uuid,
+    tag: Option<Uuid>,
+    id: Option<Uuid>,
     destination_url: Option<Url>,
     stream_regex: Option<Regex>,
 }
@@ -116,12 +117,12 @@ impl SubscriberBuilder {
     }
 
     pub fn tag(&mut self, tag: Uuid) -> &mut Self {
-        self.tag = tag;
+        self.tag = Some(tag);
         self
     }
 
     pub fn id(&mut self, id: Uuid) -> &mut Self {
-        self.id = id;
+        self.id = Some(id);
         self
     }
 
@@ -145,8 +146,8 @@ impl SubscriberBuilder {
         }
         let stream_regex = self.stream_regex.take().ok_or("Missing subscriber regex")?;
         let header = SubscriberHeader {
-            tag: self.tag,
-            id: self.id,
+            tag: self.tag.ok_or("Missing tag")?,
+            id: self.id.ok_or("Missing ID")?,
             _reserved: [0; 2],
         };
         Ok(Subscriber::new(

@@ -48,3 +48,41 @@ pub fn db_key(_args: TokenStream, input: TokenStream) -> TokenStream {
 
     expanded.into()
 }
+
+#[proc_macro_derive(ToOwned)]
+pub fn to_owned(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as ItemStruct);
+    let name = &input.ident;
+
+    // TODO maybe: Handle generics
+    let expanded = quote! {
+        impl ToOwned for #name {
+            type Owned = Box<Self>;
+
+            fn to_owned(&self) -> Box<Self> {
+                let bytes: Box<[u8]> = <Self as AsBytes>::as_bytes(self).into();
+                unsafe { <#name as crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(bytes) }
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+#[proc_macro_derive(OwnedFromBytesUnchecked)]
+pub fn owned_from_bytes_unchecked(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as ItemStruct);
+    let name = &input.ident;
+
+    // TODO maybe: Handle generics
+    let expanded = quote! {
+        impl crate::bytes::OwnedFromBytesUnchecked for #name {
+            unsafe fn owned_from_bytes_unchecked(bytes: &[u8]) -> Box<Self> {
+                let bytes: Box<[u8]> = bytes.into();
+                unsafe { <#name as crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(bytes) }
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}

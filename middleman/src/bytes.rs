@@ -6,7 +6,7 @@ pub trait FromBytesUnchecked {
     /// # Safety
     ///
     /// `bytes` must contain a valid bit pattern for this type. Size
-    /// and alignment will be validated, but field values will not be.
+    /// and alignment should be validated, but field values will not be.
     /// This is a particular hazard for types with trap
     /// representations, such as a struct containing a `bool` or enum.
     unsafe fn ref_from_bytes_unchecked(bytes: &[u8]) -> &Self;
@@ -23,6 +23,14 @@ pub trait FromBytesUnchecked {
         std::mem::forget(bytes);
         unsafe { Box::from_raw(ptr) }
     }
+}
+
+/// A version of `FromBytesUnchecked` that creates a copy.
+pub trait OwnedFromBytesUnchecked: FromBytesUnchecked + ToOwned {
+    /// Returns an owned copy of the object encoded in the given byte slice.
+    /// This method must succeed even if the input byte slice is unaligned as
+    /// long as the size is compatible.
+    unsafe fn owned_from_bytes_unchecked(bytes: &[u8]) -> <Self as ToOwned>::Owned;
 }
 
 /// Marks a type as safe to reinterpret as a byte slice (`&[u8]`). This means
@@ -71,13 +79,28 @@ pub trait AsRawBytes {
     }
 }
 
-impl FromBytesUnchecked for [u8] {
+impl<T: Copy + Sized + FromBytesUnchecked> FromBytesUnchecked for [T] {
     unsafe fn ref_from_bytes_unchecked(bytes: &[u8]) -> &Self {
-        bytes
+        debug_assert_eq!(bytes.len() % std::mem::size_of::<T>(), 0);
+        debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
+        let ptr = bytes.as_ptr() as *const T;
+        let len = bytes.len() / std::mem::size_of::<T>();
+        unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 
     unsafe fn mut_from_bytes_unchecked(bytes: &mut [u8]) -> &mut Self {
-        bytes
+        debug_assert_eq!(bytes.len() % std::mem::size_of::<T>(), 0);
+        debug_assert_eq!(bytes.as_ptr() as usize % std::mem::align_of::<T>(), 0);
+        let ptr = bytes.as_mut_ptr() as *mut T;
+        let len = bytes.len() / std::mem::size_of::<T>();
+        unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+    }
+}
+
+impl<T: Copy + Sized> OwnedFromBytesUnchecked for [T] {
+    unsafe fn owned_from_bytes_unchecked(bytes: &[u8]) -> Vec<T> {
+        debug_assert_eq!(bytes.len() % std::mem::size_of::<T>(), 0);
+        <[T] as FromBytesUnchecked>::box_from_bytes_unchecked(bytes).into()
     }
 }
 
@@ -99,13 +122,20 @@ impl FromBytesUnchecked for str {
     }
 }
 
+impl OwnedFromBytesUnchecked for str {
+    unsafe fn owned_from_bytes_unchecked(bytes: &[u8]) -> String {
+        let bytes: Box<[u8]> = bytes.into();
+        unsafe { <str as FromBytesUnchecked>::box_from_bytes_unchecked(bytes).into() }
+    }
+}
+
 impl AsRawBytes for str {
     fn as_raw_bytes(&self) -> &[MaybeUninit<u8>] {
         unsafe { std::mem::transmute(self.as_bytes()) }
     }
 }
 
-impl<T: Sized> FromBytesUnchecked for T {
+impl<T: Copy + Sized> FromBytesUnchecked for T {
     unsafe fn ref_from_bytes_unchecked(bytes: &[u8]) -> &Self {
         debug_assert!(bytes.len() >= std::mem::size_of::<Self>());
         debug_assert_eq!((bytes.as_ptr() as usize) % std::mem::align_of::<Self>(), 0);
@@ -116,6 +146,13 @@ impl<T: Sized> FromBytesUnchecked for T {
         debug_assert!(bytes.len() >= std::mem::size_of::<Self>());
         debug_assert_eq!((bytes.as_ptr() as usize) % std::mem::align_of::<Self>(), 0);
         unsafe { &mut *(bytes.as_mut_ptr() as *mut Self) }
+    }
+}
+
+impl<T: Copy> OwnedFromBytesUnchecked for T {
+    unsafe fn owned_from_bytes_unchecked(bytes: &[u8]) -> T {
+        debug_assert_eq!(bytes.len(), std::mem::size_of::<Self>());
+        (bytes.as_ptr() as *const u8 as *const Self).read_unaligned()
     }
 }
 

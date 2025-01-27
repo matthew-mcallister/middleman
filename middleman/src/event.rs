@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use uuid::Uuid;
 
 use crate::accessor::CfAccessor;
@@ -211,6 +212,7 @@ impl EventTable {
         unsafe {
             self.tag_idempotency_index_accessor()
                 .get_txn_unchecked(txn, &key)
+                .map(|x| x.map(|x| *x))
         }
     }
 

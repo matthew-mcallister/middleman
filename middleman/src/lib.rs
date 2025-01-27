@@ -124,6 +124,7 @@ mod tests {
         let subscriber1_id = uuid::uuid!("12120000-0000-8000-8000-000000000001");
         let subscriber1 = SubscriberBuilder::new()
             .tag(tag)
+            .id(subscriber1_id)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new("^asdf:").unwrap())
             .build()
@@ -132,6 +133,7 @@ mod tests {
         let subscriber2_id = uuid::uuid!("12120000-0000-8000-8000-000000000002");
         let subscriber2 = SubscriberBuilder::new()
             .tag(tag)
+            .id(subscriber2_id)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new("^asdf:1234$").unwrap())
             .build()

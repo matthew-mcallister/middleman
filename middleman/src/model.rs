@@ -6,6 +6,7 @@ macro_rules! big_tuple_struct {
         }
     ) => {
         $(#[$($meta)*])*
+        #[derive(ToOwned, OwnedFromBytesUnchecked)]
         #[repr(transparent)]
         $vis struct $Name($crate::big_tuple::BigTuple);
 
@@ -58,15 +59,6 @@ macro_rules! big_tuple_struct {
 
             unsafe fn mut_from_bytes_unchecked(bytes: &mut [u8]) -> &mut Self {
                 unsafe { std::mem::transmute($crate::big_tuple::BigTuple::mut_from_bytes_unchecked(bytes)) }
-            }
-        }
-
-        impl ToOwned for $Name {
-            type Owned = Box<Self>;
-
-            fn to_owned(&self) -> Self::Owned {
-                let src = AsBytes::as_bytes(self);
-                unsafe { <Self as $crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(src.to_owned()) }
             }
         }
 

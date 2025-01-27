@@ -1,16 +1,7 @@
 use std::sync::Arc;
 
-/// Binary key prefix.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum Prefix {
-    Event = 0,
-    EventIdempotencyKeyIndex = 1,
-    EventStreamIndex = 2,
-    Delivery = 3,
-    Subscriber = 4,
-    SubscriberTagIndex = 5,
-}
+pub type Owned<T> = <T as ToOwned>::Owned;
+pub type Owned2<T, U> = (<T as ToOwned>::Owned, <U as ToOwned>::Owned);
 
 pub(crate) type Db = rocksdb::OptimisticTransactionDB;
 // XXX: Can we convert some uses of Transaction to WriteBatch?

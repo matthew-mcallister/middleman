@@ -72,13 +72,15 @@ pub struct DeliveryTable {
     db: Arc<Db>,
 }
 
+type DeliveryKey = Packed2<Uuid, u64>;
+
 impl DeliveryTable {
     pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
         let cf = unsafe { get_or_create_cf(&db, "deliveries", &Default::default())? };
         Ok(Self { db, cf })
     }
 
-    fn accessor<'a>(&'a self) -> CfAccessor<'a, Packed2<Uuid, u64>, Delivery> {
+    fn accessor<'a>(&'a self) -> CfAccessor<'a, DeliveryKey, Delivery> {
         CfAccessor::new(&self.db, &self.cf)
     }
 
@@ -104,8 +106,15 @@ impl DeliveryTable {
         unsafe {
             Ok(self
                 .accessor()
-                .get_unchecked(&(subscriber_id, event_id).into())?)
+                .get_unchecked(&(subscriber_id, event_id).into())?
+                .map(|x| *x))
         }
+    }
+
+    pub(crate) fn iter<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = DynResult<(DeliveryKey, Delivery)>> + 'a {
+        unsafe { self.accessor().iter_unchecked() }
     }
 }
 

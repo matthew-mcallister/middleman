@@ -4,24 +4,21 @@ use std::sync::Arc;
 
 use rocksdb::DBAccess;
 
-use crate::bytes::{AsRawBytes, FromBytesUnchecked};
+use crate::bytes::{AsRawBytes, FromBytesUnchecked, OwnedFromBytesUnchecked};
 use crate::error::DynResult;
 use crate::prefix::IsPrefixOf;
-use crate::types::{Db, DbTransaction};
+use crate::types::{Db, DbTransaction, Owned, Owned2};
 
 pub struct CfAccessor<
     'db,
-    K: AsRawBytes + ToOwned + ?Sized + 'static,
-    V: FromBytesUnchecked + ToOwned + ?Sized + 'static,
+    K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized + 'static,
+    V: OwnedFromBytesUnchecked + ToOwned + ?Sized + 'static,
 > {
     db: &'db Db,
     cf: &'db Arc<rocksdb::BoundColumnFamily<'db>>,
     _k: PhantomData<*const K>,
     _v: PhantomData<*const V>,
 }
-
-type Owned<T> = <T as ToOwned>::Owned;
-type Owned2<T, U> = (<T as ToOwned>::Owned, <U as ToOwned>::Owned);
 
 struct KeyValueIter<'db, D: rocksdb::DBAccess, P: ToOwned + ?Sized, T: ?Sized, U: ?Sized> {
     raw: rocksdb::DBRawIteratorWithThreadMode<'db, D>,
@@ -34,8 +31,8 @@ impl<
         'db,
         D: rocksdb::DBAccess,
         P: ToOwned + IsPrefixOf<T> + ?Sized,
-        T: FromBytesUnchecked + ToOwned + ?Sized,
-        U: FromBytesUnchecked + ToOwned + ?Sized,
+        T: OwnedFromBytesUnchecked + ToOwned + ?Sized,
+        U: OwnedFromBytesUnchecked + ToOwned + ?Sized,
     > Iterator for KeyValueIter<'db, D, P, T, U>
 {
     type Item = DynResult<Owned2<T, U>>;
@@ -56,9 +53,7 @@ impl<
         }
 
         let key = key.to_owned();
-        // FIXME: We unfortunately cannot use ToOwned here because the source
-        // bytes are unaligned. We need a ToOwnedUnaligned trait, basically.
-        let value = unsafe { U::ref_from_bytes_unchecked(self.raw.value()?).to_owned() };
+        let value = unsafe { U::owned_from_bytes_unchecked(self.raw.value()?) };
 
         self.raw.next();
 
@@ -105,8 +100,8 @@ impl<
 
 impl<
         'db,
-        K: FromBytesUnchecked + AsRawBytes + ToOwned + ?Sized + 'static,
-        V: FromBytesUnchecked + AsRawBytes + ToOwned + ?Sized + 'static,
+        K: OwnedFromBytesUnchecked + AsRawBytes + ?Sized + 'static,
+        V: OwnedFromBytesUnchecked + AsRawBytes + ?Sized + 'static,
     > CfAccessor<'db, K, V>
 {
     pub fn new(db: &'db Db, cf: &'db Arc<rocksdb::BoundColumnFamily<'db>>) -> Self {
@@ -118,10 +113,10 @@ impl<
         }
     }
 
-    pub unsafe fn get_unchecked(&self, key: &K) -> DynResult<Option<Owned<V>>> {
+    pub unsafe fn get_unchecked(&self, key: &K) -> DynResult<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
         match self.db.get_cf(self.cf, key)? {
-            Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes).to_owned())),
+            Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
             None => Ok(None),
         }
     }
@@ -130,10 +125,10 @@ impl<
         &self,
         txn: &DbTransaction,
         key: &K,
-    ) -> DynResult<Option<Owned<V>>> {
+    ) -> DynResult<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
         match txn.get_cf(self.cf, key)? {
-            Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes).to_owned())),
+            Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
             None => Ok(None),
         }
     }
@@ -152,15 +147,58 @@ impl<
         Ok(txn.put_cf(self.cf, key, value)?)
     }
 
+    pub unsafe fn iter_unchecked(&self) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'db {
+        let mut raw = self.db.raw_iterator_cf(self.cf);
+        raw.seek_to_first();
+
+        struct Iter<'db, D: rocksdb::DBAccess, T: ?Sized, U: ?Sized> {
+            raw: rocksdb::DBRawIteratorWithThreadMode<'db, D>,
+            _t: std::marker::PhantomData<*const T>,
+            _u: std::marker::PhantomData<*const U>,
+        }
+
+        impl<
+                'db,
+                D: rocksdb::DBAccess,
+                T: OwnedFromBytesUnchecked + ToOwned + ?Sized,
+                U: OwnedFromBytesUnchecked + ToOwned + ?Sized,
+            > Iterator for Iter<'db, D, T, U>
+        {
+            type Item = DynResult<Owned2<T, U>>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if !self.raw.valid() {
+                    match self.raw.status() {
+                        Ok(_) => return None,
+                        Err(e) => return Some(Err(e.into())),
+                    }
+                }
+
+                let key = unsafe { T::owned_from_bytes_unchecked(self.raw.key()?) };
+                let value = unsafe { U::owned_from_bytes_unchecked(self.raw.value()?) };
+
+                self.raw.next();
+
+                Some(Ok((key, value)))
+            }
+        }
+
+        Iter::<_, K, V> {
+            raw,
+            _t: Default::default(),
+            _u: Default::default(),
+        }
+    }
+
     // TODO: Convert to a streaming iterator
     pub unsafe fn iter_by_prefix_unchecked<
         P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
     >(
         &self,
         // XXX: The mapping `P -> Owned<P>` is not invertible; there may be
-        // multiple possible `P` with the same `Owned<P>`. Therefore, this
-        // breaks type inference. However, you can't just take `prefix: P`
-        // either because then this breaks the call to
+        // multiple possible `P` with the same `Owned<P>`. Therefore, type
+        // inference doesn't work for this method. However, you can't just take
+        // `prefix: P` either because then this breaks the call to
         // `prefix.as_bytes_unchecked()`. I'm at a loss for how to fix type
         // inference here.
         prefix: Owned<P>,
@@ -258,13 +296,13 @@ mod tests {
         accessor.put(&key2, &value2).unwrap();
 
         unsafe {
-            assert_eq!(accessor.get_unchecked(&key1).unwrap().unwrap(), value1);
-            assert_eq!(accessor.get_unchecked(&key2).unwrap().unwrap(), value2);
+            assert_eq!(*accessor.get_unchecked(&key1).unwrap().unwrap(), value1);
+            assert_eq!(*accessor.get_unchecked(&key2).unwrap().unwrap(), value2);
         }
 
         accessor.put(&key1, &value2).unwrap();
         unsafe {
-            assert_eq!(accessor.get_unchecked(&key1).unwrap().unwrap(), value2);
+            assert_eq!(*accessor.get_unchecked(&key1).unwrap().unwrap(), value2);
         }
     }
 
