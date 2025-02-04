@@ -10,26 +10,8 @@ use crate::bytes::AsBytes;
 use crate::error::DynResult;
 use crate::key::{packed, BigEndianU64, Packed2};
 use crate::model::big_tuple_struct;
-use crate::types::{Db, DbColumnFamily, DbTransaction};
+use crate::types::{ContentType, Db, DbColumnFamily, DbTransaction};
 use crate::util::get_or_create_cf;
-
-// XXX: Probably just replace with string interning
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ContentType {
-    Json,
-}
-
-impl std::fmt::Display for ContentType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match *self {
-                ContentType::Json => "application/json",
-            }
-        )
-    }
-}
 
 // TODO: ID should probably be stored on the event
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,8 +169,7 @@ impl EventTable {
 
         // Index by tag + idempotency key
         let key = packed!(tag, idempotency_key);
-        self.tag_idempotency_index_accessor()
-            .put_txn(txn, &key, &id)?;
+        self.tag_idempotency_index_accessor().put_txn(txn, &key, &id)?;
 
         // Index by tag + stream
         let key = EventStreamIndexKey::new(&tag, event.stream(), &id.into());
@@ -235,13 +216,13 @@ impl EventTable {
     ) -> impl Iterator<Item = DynResult<(u64, Box<Event>)>> + 'a {
         let prefix = big_tuple!(&tag, stream);
         unsafe {
-            self.tag_stream_index_accessor()
-                .iter_keys_by_prefix_unchecked::<BigTuple>(prefix)
-                .map(move |key| {
+            self.tag_stream_index_accessor().iter_keys_by_prefix_unchecked::<BigTuple>(prefix).map(
+                move |key| {
                     let id = *key?.id();
                     let event = self.accessor().get_unchecked(&id)?.unwrap();
                     Ok((id.into(), event))
-                })
+                },
+            )
         }
     }
 }

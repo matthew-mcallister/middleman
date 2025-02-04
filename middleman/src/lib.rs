@@ -12,6 +12,7 @@ pub mod big_tuple;
 pub mod bytes;
 pub mod comparator;
 pub mod config;
+pub mod connection;
 pub mod delivery;
 pub mod error;
 pub mod event;
@@ -69,9 +70,7 @@ impl Application {
         event_id: u64,
         event: &Event,
     ) -> DynResult<()> {
-        let subscribers = self
-            .subscribers
-            .iter_by_stream(txn, event.tag(), event.stream());
+        let subscribers = self.subscribers.iter_by_stream(txn, event.tag(), event.stream());
         for subscriber in subscribers {
             self.deliveries.create(txn, subscriber?.id(), event_id)?;
         }
@@ -84,9 +83,10 @@ mod tests {
     use regex::Regex;
     use url::Url;
 
-    use crate::event::{ContentType, EventBuilder};
+    use crate::event::EventBuilder;
     use crate::subscriber::SubscriberBuilder;
     use crate::testing::TestHarness;
+    use crate::types::ContentType;
 
     #[test]
     fn test_create_event_idempotency() {
@@ -152,18 +152,10 @@ mod tests {
             .build();
         let event_id = app.create_event(&event).unwrap();
 
-        let delivery1 = app
-            .deliveries
-            .get(subscriber1_id, event_id)
-            .unwrap()
-            .unwrap();
+        let delivery1 = app.deliveries.get(subscriber1_id, event_id).unwrap().unwrap();
         assert_eq!(delivery1.attempts_made(), 0);
 
-        let delivery2 = app
-            .deliveries
-            .get(subscriber2_id, event_id)
-            .unwrap()
-            .unwrap();
+        let delivery2 = app.deliveries.get(subscriber2_id, event_id).unwrap().unwrap();
         assert_eq!(delivery2.attempts_made(), 0);
     }
 }
