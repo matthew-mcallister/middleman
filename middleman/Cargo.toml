@@ -8,6 +8,7 @@ bitflags = "2.8.0"
 byteorder = "1.5.0"
 chrono = "0.4.38"
 clap = "4.5.21"
+compact_str = "0.8.1"
 dashmap = "6.1.0"
 dotenvy = "0.15.7"
 hyper = { version = "1.5.2", features = ["http1", "http2", "client"] }
@@ -25,5 +26,10 @@ uuid = { version = "1.11.0", features = ["v4"] }
 [dev-dependencies]
 tempfile = "3.14.0"
 
-[profile.dev.package.parking_lot]
+[dev-dependencies.parking_lot]
+version = "0.12.3"
 features = ["deadlock_detection"]
+
+[dev-dependencies.tokio]
+version = "1.41.1"
+features = ["full", "test-util", "tracing"]

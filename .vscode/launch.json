@@ -13,7 +13,9 @@
                     "test",
                     "--no-run",
                     "--lib",
-                    "--package=middleman"
+                    "--package=middleman",
+                    "--",
+                    "--test-threads=1"
                 ],
                 "filter": {
                     "name": "middleman",

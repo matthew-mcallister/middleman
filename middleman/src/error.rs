@@ -1,6 +1,6 @@
 use std::error::Error;
 
-pub type DynError = Box<dyn Error>;
+pub type DynError = Box<dyn Error + Send + Sync>;
 pub type DynResult<T> = Result<T, DynError>;
 
 /// Error raised when a log file record is invalid or corrupted. In case a log
