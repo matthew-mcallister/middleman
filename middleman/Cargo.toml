@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+axum = "0.8.1"
 bitflags = "2.8.0"
 byteorder = "1.5.0"
 chrono = "0.4.38"
@@ -11,17 +12,22 @@ clap = "4.5.21"
 compact_str = "0.8.1"
 dashmap = "6.1.0"
 dotenvy = "0.15.7"
+env_logger = "0.11.6"
 hyper = { version = "1.5.2", features = ["http1", "http2", "client"] }
+log = "0.4.25"
 middleman_macros = { version = "0.1.0", path = "../middleman_macros" }
 parking_lot = "0.12.3"
 paste = "1.0.15"
 rand = "0.9.0"
 regex = "1.11.1"
-rocksdb = { version = "0.22.0", features = ["multi-threaded-cf"] }
+rocksdb = { version = "0.23.0", features = ["multi-threaded-cf"] }
+serde = "1.0.217"
+serde_derive = "1.0.217"
+strum = "0.27.0"
+strum_macros = "0.27.0"
 tokio = { version = "1.41.1", features = ["full"] }
-tonic = "0.12.3"
 url = "2.5.4"
-uuid = { version = "1.11.0", features = ["v4"] }
+uuid = { version = "1.11.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tempfile = "3.14.0"
@@ -33,3 +39,7 @@ features = ["deadlock_detection"]
 [dev-dependencies.tokio]
 version = "1.41.1"
 features = ["full", "test-util", "tracing"]
+
+[dev-dependencies.axum]
+version = "0.8.1"
+features = ["macros"]

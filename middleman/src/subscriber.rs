@@ -11,7 +11,8 @@ use crate::error::DynResult;
 use crate::key::{packed, Packed2};
 use crate::model::big_tuple_struct;
 use crate::types::{Db, DbColumnFamily, DbTransaction};
-use crate::util::get_or_create_cf;
+use crate::util::get_cf;
+use crate::ColumnFamilyName;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct SubscriberHeader {
@@ -33,7 +34,7 @@ big_tuple_struct! {
 
 pub(crate) struct SubscriberTable {
     cf: DbColumnFamily,
-    // XXX: Drop last
+    // NB: Drop last
     db: Arc<Db>,
 }
 
@@ -51,7 +52,7 @@ impl Subscriber {
 
 impl SubscriberTable {
     pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
-        let cf = unsafe { get_or_create_cf(&db, "subscribers", &Default::default())? };
+        let cf = unsafe { get_cf(&db, ColumnFamilyName::Subscribers) };
         Ok(Self { db, cf })
     }
 
@@ -137,10 +138,7 @@ impl SubscriberBuilder {
     }
 
     pub fn build(&mut self) -> DynResult<Box<Subscriber>> {
-        let destination_url = self
-            .destination_url
-            .take()
-            .ok_or("Missing subscriber URL")?;
+        let destination_url = self.destination_url.take().ok_or("Missing subscriber URL")?;
         if destination_url.scheme() != "http" && destination_url.scheme() != "https" {
             return Err("Invalid subscriber URL".into());
         }
@@ -188,8 +186,10 @@ mod tests {
         assert_eq!(subscriber.destination_url(), url);
 
         let mut harness = TestHarness::new();
-        let db = harness.db();
-        let subscribers = SubscriberTable::new(Arc::clone(&db)).unwrap();
+        let app = harness.application();
+        let db = &app.db;
+        let subscribers = &app.subscribers;
+
         let txn = db.transaction();
         subscribers.create(&txn, &subscriber).unwrap();
         txn.commit().unwrap();

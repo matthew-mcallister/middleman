@@ -8,7 +8,8 @@ use crate::bytes::AsBytes;
 use crate::error::DynResult;
 use crate::key::Packed2;
 use crate::types::{Db, DbColumnFamily, DbTransaction};
-use crate::util::get_or_create_cf;
+use crate::util::get_cf;
+use crate::ColumnFamilyName;
 
 // UTC datetime with stable binary representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,7 +69,7 @@ unsafe impl AsBytes for Delivery {}
 
 pub struct DeliveryTable {
     cf: DbColumnFamily,
-    // XXX: Drop last
+    // NB: Drop last
     db: Arc<Db>,
 }
 
@@ -76,7 +77,7 @@ type DeliveryKey = Packed2<Uuid, u64>;
 
 impl DeliveryTable {
     pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
-        let cf = unsafe { get_or_create_cf(&db, "deliveries", &Default::default())? };
+        let cf = unsafe { get_cf(&db, ColumnFamilyName::Deliveries) };
         Ok(Self { db, cf })
     }
 
@@ -97,18 +98,12 @@ impl DeliveryTable {
             next_attempt: Utc::now().into(),
             _reserved: [0; 2],
         };
-        self.accessor()
-            .put_txn(&txn, &(subscriber_id, event_id).into(), &delivery)?;
+        self.accessor().put_txn(&txn, &(subscriber_id, event_id).into(), &delivery)?;
         Ok(delivery)
     }
 
     pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> DynResult<Option<Delivery>> {
-        unsafe {
-            Ok(self
-                .accessor()
-                .get_unchecked(&(subscriber_id, event_id).into())?
-                .map(|x| *x))
-        }
+        unsafe { Ok(self.accessor().get_unchecked(&(subscriber_id, event_id).into())?.map(|x| *x)) }
     }
 
     pub(crate) fn iter<'a>(
@@ -140,21 +135,23 @@ impl Delivery {
 mod tests {
     use std::sync::Arc;
 
-    use crate::{delivery::DeliveryTable, testing::TestHarness};
+    use crate::delivery::DeliveryTable;
+    use crate::testing::TestHarness;
 
     #[test]
     fn test_create_delivery() {
         let mut harness = TestHarness::new();
-        let db = harness.db();
-        let table = DeliveryTable::new(Arc::clone(&db)).unwrap();
+        let app = harness.application();
+        let db = &app.db;
+        let deliveries = &app.deliveries;
 
         let subscriber_id = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let event_id: u64 = 1;
         let txn = db.transaction();
-        let delivery = table.create(&txn, subscriber_id, event_id).unwrap();
+        let delivery = deliveries.create(&txn, subscriber_id, event_id).unwrap();
         txn.commit().unwrap();
 
-        let delivery2 = table.get(subscriber_id, event_id).unwrap().unwrap();
+        let delivery2 = deliveries.get(subscriber_id, event_id).unwrap().unwrap();
         assert_eq!(delivery, delivery2);
     }
 }

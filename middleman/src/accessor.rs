@@ -190,7 +190,7 @@ impl<
         }
     }
 
-    // TODO: Convert to a streaming iterator
+    // TODO: Convert to a streaming iterator to eliminate copies
     pub unsafe fn iter_by_prefix_unchecked<
         P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
     >(
@@ -282,7 +282,7 @@ mod tests {
         type Value = (u32, i16, [u8; 2]);
 
         let mut harness = TestHarness::new();
-        let db = harness.db();
+        let db = &harness.application().db;
         db.create_cf("cf", &Default::default()).unwrap();
         let cf = db.cf_handle("cf").unwrap();
         let accessor = CfAccessor::<Key, Value>::new(&db, &cf);
@@ -312,7 +312,7 @@ mod tests {
         type Value = u32;
 
         let mut harness = TestHarness::new();
-        let db = harness.db();
+        let db = &harness.application().db;
         db.create_cf("cf", &Default::default()).unwrap();
         let cf = db.cf_handle("cf").unwrap();
         let accessor = CfAccessor::<Key, Value>::new(&db, &cf);

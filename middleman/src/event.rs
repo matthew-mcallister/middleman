@@ -5,13 +5,14 @@ use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use uuid::Uuid;
 
 use crate::accessor::CfAccessor;
-use crate::big_tuple::{big_tuple, big_tuple_comparator, BigTuple};
+use crate::big_tuple::{big_tuple, BigTuple};
 use crate::bytes::AsBytes;
 use crate::error::DynResult;
 use crate::key::{packed, BigEndianU64, Packed2};
 use crate::model::big_tuple_struct;
 use crate::types::{ContentType, Db, DbColumnFamily, DbTransaction};
-use crate::util::get_or_create_cf;
+use crate::util::get_cf;
+use crate::ColumnFamilyName;
 
 // TODO: ID should probably be stored on the event
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,11 +51,11 @@ impl Event {
 
 #[derive(Clone, Debug, Default)]
 pub struct EventBuilder<'a> {
-    idempotency_key: Uuid,
-    tag: Uuid,
+    idempotency_key: Option<Uuid>,
+    tag: Option<Uuid>,
     content_type: Option<ContentType>,
-    stream: &'a str,
-    payload: &'a [u8],
+    stream: Option<&'a str>,
+    payload: Option<&'a [u8]>,
 }
 
 impl<'a> EventBuilder<'a> {
@@ -68,34 +69,34 @@ impl<'a> EventBuilder<'a> {
     }
 
     pub fn idempotency_key(&mut self, key: impl Into<Uuid>) -> &mut Self {
-        self.idempotency_key = key.into();
+        self.idempotency_key = Some(key.into());
         self
     }
 
     pub fn tag(&mut self, tag: Uuid) -> &mut Self {
-        self.tag = tag;
+        self.tag = Some(tag);
         self
     }
 
     pub fn stream(&mut self, stream: &'a str) -> &mut Self {
-        self.stream = stream;
+        self.stream = Some(stream);
         self
     }
 
     pub fn payload(&mut self, payload: &'a [u8]) -> &mut Self {
-        self.payload = payload;
+        self.payload = Some(payload);
         self
     }
 
     pub fn build(&mut self) -> Box<Event> {
         Event::new(
             &EventHeader {
-                tag: self.tag,
-                idempotency_key: self.idempotency_key,
+                tag: self.tag.unwrap(),
+                idempotency_key: self.idempotency_key.unwrap(),
                 _reserved: [0; 2],
             },
-            self.stream,
-            self.payload,
+            self.stream.unwrap(),
+            self.payload.unwrap(),
         )
     }
 }
@@ -106,7 +107,7 @@ pub(crate) struct EventTable {
     cf: DbColumnFamily,
     tag_idempotency_index_cf: DbColumnFamily,
     tag_stream_index_cf: DbColumnFamily,
-    // XXX: Drop last
+    // NB: Drop last
     db: Arc<Db>,
 }
 
@@ -121,12 +122,10 @@ big_tuple_struct! {
 impl EventTable {
     pub fn new(db: Arc<Db>) -> DynResult<Self> {
         unsafe {
-            let cf = get_or_create_cf(&db, "events", &Default::default())?;
+            let cf = get_cf(&db, ColumnFamilyName::Events);
             let tag_idempotency_index_cf =
-                get_or_create_cf(&db, "event_tag_idempotency_key_index", &Default::default())?;
-            let mut options = rocksdb::Options::default();
-            options.set_comparator("big_tuple", Box::new(big_tuple_comparator));
-            let tag_stream_index_cf = get_or_create_cf(&db, "event_tag_stream_index", &options)?;
+                get_cf(&db, ColumnFamilyName::EventTagIdempotencyKeyIndex);
+            let tag_stream_index_cf = get_cf(&db, ColumnFamilyName::EventTagStreamIndex);
             Ok(Self {
                 db,
                 event_sequence_number: AtomicU64::new(0),
@@ -239,9 +238,11 @@ mod tests {
     fn test_builder() {
         let stream = "my_stream";
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
+        let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000001");
         let payload = b"1234ideclareathumbwar";
         let event = EventBuilder::new()
             .content_type(ContentType::Json)
+            .idempotency_key(idempotency_key)
             .stream(stream)
             .tag(tag)
             .payload(payload)
@@ -249,6 +250,7 @@ mod tests {
         assert_eq!(event.content_type(), ContentType::Json);
         assert_eq!(event.stream(), stream);
         assert_eq!(event.tag(), tag);
+        assert_eq!(event.idempotency_key(), idempotency_key);
         assert_eq!(event.payload(), payload);
     }
 
@@ -265,9 +267,10 @@ mod tests {
     #[test]
     fn test_create() {
         let mut harness = TestHarness::new();
-        let db = harness.db();
+        let app = harness.application();
+        let db = &app.db;
+        let events = &app.events;
 
-        let events = EventTable::new(Arc::clone(&db)).unwrap();
         let event = testing_event();
         let txn = db.transaction();
         let id = events.create(&txn, &event).unwrap();
@@ -282,9 +285,10 @@ mod tests {
     #[test]
     fn test_idempotency() {
         let mut harness = TestHarness::new();
-        let db = harness.db();
+        let app = harness.application();
+        let db = &app.db;
+        let events = &app.events;
 
-        let events = EventTable::new(Arc::clone(&db)).unwrap();
         let event = testing_event();
         let txn = db.transaction();
         let id = events.create(&txn, &event).unwrap();
@@ -312,9 +316,9 @@ mod tests {
     #[should_panic]
     fn test_idempotency_conflict() {
         let mut harness = TestHarness::new();
-        let db = harness.db();
-
-        let events = EventTable::new(Arc::clone(&db)).unwrap();
+        let app = harness.application();
+        let db = &app.db;
+        let events = &app.events;
 
         let event = testing_event();
         let mut opts = rocksdb::OptimisticTransactionOptions::new();
@@ -331,8 +335,9 @@ mod tests {
     #[test]
     fn test_iter_by_stream() {
         let mut harness = TestHarness::new();
-        let db = harness.db();
-        let events = EventTable::new(Arc::clone(&db)).unwrap();
+        let app = harness.application();
+        let db = &app.db;
+        let events = &app.events;
 
         let txn = db.transaction();
         let mut base = EventBuilder::new();

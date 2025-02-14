@@ -3,10 +3,8 @@ use std::mem::MaybeUninit;
 use bitflags::bitflags;
 use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 
-use crate::{
-    bytes::{AsBytes, AsRawBytes, FromBytesUnchecked},
-    prefix::IsPrefixOf,
-};
+use crate::bytes::{AsBytes, AsRawBytes, FromBytesUnchecked};
+use crate::prefix::IsPrefixOf;
 
 bitflags! {
     #[derive(Default)]
@@ -190,13 +188,8 @@ macro_rules! common_impl {
                 if self.len() == 0 {
                     return true;
                 }
-                self.iter()
-                    .take(self.len() - 1)
-                    .zip(other.iter())
-                    .all(|(a, b)| a == b)
-                    && self
-                        .get(self.len() - 1)
-                        .is_prefix_of(other.get(self.len() - 1))
+                self.iter().take(self.len() - 1).zip(other.iter()).all(|(a, b)| a == b)
+                    && self.get(self.len() - 1).is_prefix_of(other.get(self.len() - 1))
             }
         }
     };
@@ -375,8 +368,6 @@ impl AsRef<BigTupleUnaligned> for BigTuple {
     }
 }
 
-// FIXME: Oh man... This is totally borked because rocksdb does not
-// give aligned memory. Dreams crushed.
 pub(crate) fn big_tuple_comparator(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     unsafe {
         let a = BigTupleUnaligned::ref_from_bytes_unchecked(a);
@@ -399,11 +390,9 @@ pub(crate) use big_tuple;
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        big_tuple::BigTupleUnaligned,
-        bytes::{AsBytes, FromBytesUnchecked},
-        prefix::IsPrefixOf,
-    };
+    use crate::big_tuple::BigTupleUnaligned;
+    use crate::bytes::{AsBytes, FromBytesUnchecked};
+    use crate::prefix::IsPrefixOf;
 
     use super::{BigTuple, BigTupleCreateInfo};
 

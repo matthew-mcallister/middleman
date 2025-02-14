@@ -4,10 +4,12 @@ use config::Config;
 use delivery::DeliveryTable;
 use error::DynResult;
 use event::{Event, EventTable};
+use migration::Migrator;
 use subscriber::SubscriberTable;
-use types::{Db, DbTransaction};
+use types::{ColumnFamilyName, Db, DbTransaction};
 
 pub mod accessor;
+pub mod api;
 pub mod big_tuple;
 pub mod bytes;
 pub mod comparator;
@@ -17,6 +19,7 @@ pub mod delivery;
 pub mod error;
 pub mod event;
 pub mod key;
+pub mod migration;
 pub mod model;
 pub mod prefix;
 pub mod subscriber;
@@ -25,21 +28,22 @@ mod testing;
 pub mod types;
 mod util;
 
+pub use util::init_logging;
+
 pub struct Application {
     pub(crate) config: Box<Config>,
     pub(crate) events: EventTable,
     pub(crate) deliveries: DeliveryTable,
     pub(crate) subscribers: SubscriberTable,
-    // XXX: Drop last
+    // NB: Drop last
     pub(crate) db: Arc<Db>,
 }
 
 impl Application {
     pub fn new(config: Box<Config>) -> DynResult<Self> {
-        let mut options = rocksdb::Options::default();
-        options.create_if_missing(true);
-        let db = Db::open(&options, &config.db_dir)?;
-        let db = Arc::new(db);
+        let mut migrator = Migrator::new(&config.db_dir)?;
+        migrator.migrate()?;
+        let db = Arc::new(migrator.unwrap());
 
         let events = EventTable::new(Arc::clone(&db))?;
         let deliveries = DeliveryTable::new(Arc::clone(&db))?;

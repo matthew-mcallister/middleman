@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
+use serde_derive::{Deserialize, Serialize};
+use strum_macros::{IntoStaticStr, VariantNames};
+
 // XXX: Support other content types
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum ContentType {
+    #[serde(rename = "application/json")]
     Json,
 }
 
@@ -25,3 +29,12 @@ pub(crate) type Db = rocksdb::OptimisticTransactionDB;
 // XXX: Can we convert some uses of Transaction to WriteBatch?
 pub(crate) type DbTransaction<'db> = rocksdb::Transaction<'db, Db>;
 pub(crate) type DbColumnFamily = Arc<rocksdb::BoundColumnFamily<'static>>;
+
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq, VariantNames)]
+pub(crate) enum ColumnFamilyName {
+    Deliveries,
+    Events,
+    EventTagIdempotencyKeyIndex,
+    EventTagStreamIndex,
+    Subscribers,
+}

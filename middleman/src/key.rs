@@ -1,5 +1,3 @@
-use std::convert::TryFrom;
-
 use crate::bytes::AsBytes;
 use crate::prefix::IsPrefixOf;
 
@@ -18,9 +16,8 @@ impl std::error::Error for StringOverflowError {}
 // is out of the valid codepoint range (0x80-0x7ff).
 const UTF8_INVALID_BYTE: u8 = 0xc0;
 
-// XXX: Sigh... this is obsoleted by using comparators.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FiniteString<const N: usize> {
+pub(crate) struct FiniteString<const N: usize> {
     bytes: [u8; N],
 }
 
