@@ -69,20 +69,18 @@ unsafe impl AsBytes for Delivery {}
 
 pub struct DeliveryTable {
     cf: DbColumnFamily,
-    // NB: Drop last
-    db: Arc<Db>,
 }
 
 type DeliveryKey = Packed2<Uuid, u64>;
 
 impl DeliveryTable {
     pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
-        let cf = unsafe { get_cf(&db, ColumnFamilyName::Deliveries) };
-        Ok(Self { db, cf })
+        let cf = get_cf(db, ColumnFamilyName::Deliveries);
+        Ok(Self { cf })
     }
 
     fn accessor<'a>(&'a self) -> CfAccessor<'a, DeliveryKey, Delivery> {
-        CfAccessor::new(&self.db, &self.cf)
+        CfAccessor::new(&self.cf)
     }
 
     pub(crate) fn create(

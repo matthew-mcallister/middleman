@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use owning_ref::OwningRef;
 use serde_derive::{Deserialize, Serialize};
 use strum_macros::{IntoStaticStr, VariantNames};
 
@@ -25,10 +26,10 @@ impl std::fmt::Display for ContentType {
 pub type Owned<T> = <T as ToOwned>::Owned;
 pub type Owned2<T, U> = (<T as ToOwned>::Owned, <U as ToOwned>::Owned);
 
-pub(crate) type Db = rocksdb::OptimisticTransactionDB;
+pub(crate) type Db = rocksdb::OptimisticTransactionDB<rocksdb::SingleThreaded>;
 // XXX: Can we convert some uses of Transaction to WriteBatch?
 pub(crate) type DbTransaction<'db> = rocksdb::Transaction<'db, Db>;
-pub(crate) type DbColumnFamily = Arc<rocksdb::BoundColumnFamily<'static>>;
+pub(crate) type DbColumnFamily = OwningRef<Arc<Db>, rocksdb::ColumnFamily>;
 
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq, VariantNames)]
 pub(crate) enum ColumnFamilyName {

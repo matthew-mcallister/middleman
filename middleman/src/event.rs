@@ -107,8 +107,6 @@ pub(crate) struct EventTable {
     cf: DbColumnFamily,
     tag_idempotency_index_cf: DbColumnFamily,
     tag_stream_index_cf: DbColumnFamily,
-    // NB: Drop last
-    db: Arc<Db>,
 }
 
 big_tuple_struct! {
@@ -121,31 +119,30 @@ big_tuple_struct! {
 
 impl EventTable {
     pub fn new(db: Arc<Db>) -> DynResult<Self> {
-        unsafe {
-            let cf = get_cf(&db, ColumnFamilyName::Events);
-            let tag_idempotency_index_cf =
-                get_cf(&db, ColumnFamilyName::EventTagIdempotencyKeyIndex);
-            let tag_stream_index_cf = get_cf(&db, ColumnFamilyName::EventTagStreamIndex);
-            Ok(Self {
-                db,
-                event_sequence_number: AtomicU64::new(0),
-                cf,
-                tag_idempotency_index_cf,
-                tag_stream_index_cf,
-            })
-        }
+        let cf = get_cf(Arc::clone(&db), ColumnFamilyName::Events);
+        let tag_idempotency_index_cf = get_cf(
+            Arc::clone(&db),
+            ColumnFamilyName::EventTagIdempotencyKeyIndex,
+        );
+        let tag_stream_index_cf = get_cf(db, ColumnFamilyName::EventTagStreamIndex);
+        Ok(Self {
+            event_sequence_number: AtomicU64::new(0),
+            cf,
+            tag_idempotency_index_cf,
+            tag_stream_index_cf,
+        })
     }
 
     fn accessor<'a>(&'a self) -> CfAccessor<'a, BigEndianU64, Event> {
-        CfAccessor::new(&self.db, &self.cf)
+        CfAccessor::new(&self.cf)
     }
 
     fn tag_idempotency_index_accessor<'a>(&'a self) -> CfAccessor<'a, Packed2<Uuid, Uuid>, u64> {
-        CfAccessor::new(&self.db, &self.tag_idempotency_index_cf)
+        CfAccessor::new(&self.tag_idempotency_index_cf)
     }
 
     fn tag_stream_index_accessor<'a>(&'a self) -> CfAccessor<'a, EventStreamIndexKey, ()> {
-        CfAccessor::new(&self.db, &self.tag_stream_index_cf)
+        CfAccessor::new(&self.tag_stream_index_cf)
     }
 
     /// Creates an event. Event creation is atomic but *not* synchronized,

@@ -7,15 +7,14 @@ use rocksdb::DBAccess;
 use crate::bytes::{AsRawBytes, FromBytesUnchecked, OwnedFromBytesUnchecked};
 use crate::error::DynResult;
 use crate::prefix::IsPrefixOf;
-use crate::types::{Db, DbTransaction, Owned, Owned2};
+use crate::types::{Db, DbColumnFamily, DbTransaction, Owned, Owned2};
 
 pub struct CfAccessor<
     'db,
     K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized + 'static,
     V: OwnedFromBytesUnchecked + ToOwned + ?Sized + 'static,
 > {
-    db: &'db Db,
-    cf: &'db Arc<rocksdb::BoundColumnFamily<'db>>,
+    cf: &'db DbColumnFamily,
     _k: PhantomData<*const K>,
     _v: PhantomData<*const V>,
 }
@@ -104,18 +103,25 @@ impl<
         V: OwnedFromBytesUnchecked + AsRawBytes + ?Sized + 'static,
     > CfAccessor<'db, K, V>
 {
-    pub fn new(db: &'db Db, cf: &'db Arc<rocksdb::BoundColumnFamily<'db>>) -> Self {
+    pub fn new(cf: &'db DbColumnFamily) -> Self {
         Self {
-            db,
             cf,
             _k: Default::default(),
             _v: Default::default(),
         }
     }
 
+    fn db(&self) -> &'db Db {
+        self.cf.as_owner()
+    }
+
+    fn cf(&self) -> &'db rocksdb::ColumnFamily {
+        &**self.cf
+    }
+
     pub unsafe fn get_unchecked(&self, key: &K) -> DynResult<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
-        match self.db.get_cf(self.cf, key)? {
+        match self.db().get_cf(self.cf(), key)? {
             Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
             None => Ok(None),
         }
@@ -127,7 +133,7 @@ impl<
         key: &K,
     ) -> DynResult<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
-        match txn.get_cf(self.cf, key)? {
+        match txn.get_cf(self.cf(), key)? {
             Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
             None => Ok(None),
         }
@@ -138,17 +144,17 @@ impl<
         // when uninitialized should be safe
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
-        Ok(self.db.put_cf(self.cf, key, value)?)
+        Ok(self.db().put_cf(self.cf(), key, value)?)
     }
 
     pub fn put_txn(&self, txn: &DbTransaction, key: &K, value: &V) -> DynResult<()> {
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
-        Ok(txn.put_cf(self.cf, key, value)?)
+        Ok(txn.put_cf(self.cf(), key, value)?)
     }
 
     pub unsafe fn iter_unchecked(&self) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'db {
-        let mut raw = self.db.raw_iterator_cf(self.cf);
+        let mut raw = self.db().raw_iterator_cf(self.cf());
         raw.seek_to_first();
 
         struct Iter<'db, D: rocksdb::DBAccess, T: ?Sized, U: ?Sized> {
@@ -203,7 +209,7 @@ impl<
         // inference here.
         prefix: Owned<P>,
     ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'db {
-        let mut raw = self.db.raw_iterator_cf(self.cf);
+        let mut raw = self.db().raw_iterator_cf(self.cf());
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
         KeyValueIter::<Db, P, K, V> {
@@ -222,7 +228,7 @@ impl<
         txn: &'txn DbTransaction<'txn>,
         prefix: Owned<P>,
     ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'txn {
-        let mut raw = txn.raw_iterator_cf(self.cf);
+        let mut raw = txn.raw_iterator_cf(self.cf());
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
         KeyValueIter::<DbTransaction<'txn>, P, K, V> {
@@ -239,7 +245,7 @@ impl<
         &self,
         prefix: Owned<P>,
     ) -> impl Iterator<Item = DynResult<Owned<K>>> + 'db {
-        let mut raw = self.db.raw_iterator_cf(self.cf);
+        let mut raw = self.db().raw_iterator_cf(self.cf());
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
         KeyIter::<Db, P, K> {
@@ -258,7 +264,7 @@ impl<
         txn: &'txn DbTransaction<'txn>,
         prefix: Owned<P>,
     ) -> impl Iterator<Item = DynResult<Owned<K>>> + 'txn {
-        let mut raw = txn.raw_iterator_cf(self.cf);
+        let mut raw = txn.raw_iterator_cf(self.cf());
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
         KeyIter::<DbTransaction<'txn>, P, K> {
@@ -272,20 +278,35 @@ impl<
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use owning_ref::OwningRef;
+
     use crate::accessor::CfAccessor;
     use crate::key::{BigEndianU16, FiniteString, Packed2};
     use crate::testing::TestHarness;
+    use crate::types::DbColumnFamily;
+    use crate::Db;
+
+    fn cf() -> DbColumnFamily {
+        let mut harness = TestHarness::new();
+        let db_dir = harness.db_dir();
+
+        let mut options = rocksdb::Options::default();
+        options.create_if_missing(true);
+
+        let mut db = Db::open(&options, &db_dir).unwrap();
+        db.create_cf("cf", &Default::default()).unwrap();
+        OwningRef::new(Arc::new(db)).map(|db| db.cf_handle("cf").unwrap())
+    }
 
     #[test]
     fn test_get_put() {
         type Key = Packed2<BigEndianU16, FiniteString<4>>;
         type Value = (u32, i16, [u8; 2]);
 
-        let mut harness = TestHarness::new();
-        let db = &harness.application().db;
-        db.create_cf("cf", &Default::default()).unwrap();
-        let cf = db.cf_handle("cf").unwrap();
-        let accessor = CfAccessor::<Key, Value>::new(&db, &cf);
+        let cf = cf();
+        let accessor = CfAccessor::<Key, Value>::new(&cf);
 
         let key1: Key = (1.into(), FiniteString::try_from("blah").unwrap()).into();
         let value1: Value = (1, 2, [3, 4]);
@@ -311,11 +332,8 @@ mod tests {
         type Key = Packed2<BigEndianU16, FiniteString<4>>;
         type Value = u32;
 
-        let mut harness = TestHarness::new();
-        let db = &harness.application().db;
-        db.create_cf("cf", &Default::default()).unwrap();
-        let cf = db.cf_handle("cf").unwrap();
-        let accessor = CfAccessor::<Key, Value>::new(&db, &cf);
+        let cf = cf();
+        let accessor = CfAccessor::<Key, Value>::new(&cf);
 
         let key1: Key = (1.into(), FiniteString::try_from("blah").unwrap()).into();
         let value1: Value = 1;

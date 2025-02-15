@@ -32,11 +32,10 @@ pub use util::init_logging;
 
 pub struct Application {
     pub(crate) config: Box<Config>,
+    pub(crate) db: Arc<Db>,
     pub(crate) events: EventTable,
     pub(crate) deliveries: DeliveryTable,
     pub(crate) subscribers: SubscriberTable,
-    // NB: Drop last
-    pub(crate) db: Arc<Db>,
 }
 
 impl Application {

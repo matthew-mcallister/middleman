@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
+use owning_ref::OwningRef;
+
 use crate::types::{ColumnFamilyName, Db, DbColumnFamily};
 
 // Looks up a column family, unsafely rewriting the lifetime to be static.
-pub(crate) unsafe fn get_cf(db: &Db, name: ColumnFamilyName) -> DbColumnFamily {
+pub(crate) fn get_cf(db: Arc<Db>, name: ColumnFamilyName) -> DbColumnFamily {
     let name: &'static str = name.into();
-    let cf = db.cf_handle(name).unwrap();
-    unsafe { std::mem::transmute(cf) }
+    OwningRef::new(db).map(|db| db.cf_handle(name).unwrap())
 }
 
 pub fn init_logging() {

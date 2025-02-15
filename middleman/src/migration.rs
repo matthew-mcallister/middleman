@@ -161,16 +161,6 @@ impl Migrator {
         Ok(())
     }
 
-    fn create_cf(&self, name: ColumnFamilyName) -> Result<()> {
-        self.create_cf_opts(name, &Default::default())
-    }
-
-    fn create_cf_opts(&self, name: ColumnFamilyName, options: &rocksdb::Options) -> Result<()> {
-        let name: &'static str = name.into();
-        self.db.create_cf(name, options)?;
-        Ok(())
-    }
-
     fn log_migration(&self, version: Version) {
         let version_num = version as u32;
         info!("Migrating to DB version {}", version_num);

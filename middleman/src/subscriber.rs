@@ -34,8 +34,6 @@ big_tuple_struct! {
 
 pub(crate) struct SubscriberTable {
     cf: DbColumnFamily,
-    // NB: Drop last
-    db: Arc<Db>,
 }
 
 pub(crate) type SubscriberKey = Packed2<Uuid, Uuid>;
@@ -52,12 +50,12 @@ impl Subscriber {
 
 impl SubscriberTable {
     pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
-        let cf = unsafe { get_cf(&db, ColumnFamilyName::Subscribers) };
-        Ok(Self { db, cf })
+        let cf = get_cf(db, ColumnFamilyName::Subscribers);
+        Ok(Self { cf })
     }
 
     fn accessor<'a>(&'a self) -> CfAccessor<'a, SubscriberKey, Subscriber> {
-        CfAccessor::new(&self.db, &self.cf)
+        CfAccessor::new(&self.cf)
     }
 
     pub fn create(&self, txn: &DbTransaction, subscriber: &Subscriber) -> DynResult<()> {
