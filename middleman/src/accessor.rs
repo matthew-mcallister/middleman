@@ -1,13 +1,13 @@
 use std::borrow::Borrow;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use rocksdb::DBAccess;
 
 use crate::bytes::{AsRawBytes, FromBytesUnchecked, OwnedFromBytesUnchecked};
 use crate::error::DynResult;
 use crate::prefix::IsPrefixOf;
-use crate::types::{Db, DbColumnFamily, DbTransaction, Owned, Owned2};
+use crate::transaction::Transaction;
+use crate::types::{Db, DbColumnFamily, Owned, Owned2};
 
 pub struct CfAccessor<
     'db,
@@ -115,13 +115,9 @@ impl<
         self.cf.as_owner()
     }
 
-    fn cf(&self) -> &'db rocksdb::ColumnFamily {
-        &**self.cf
-    }
-
     pub unsafe fn get_unchecked(&self, key: &K) -> DynResult<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
-        match self.db().get_cf(self.cf(), key)? {
+        match self.db().get_cf(&**self.cf, key)? {
             Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
             None => Ok(None),
         }
@@ -129,11 +125,11 @@ impl<
 
     pub unsafe fn get_txn_unchecked(
         &self,
-        txn: &DbTransaction,
+        txn: &Transaction<'_>,
         key: &K,
     ) -> DynResult<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
-        match txn.get_cf(self.cf(), key)? {
+        match txn.get_cf(self.cf, key)? {
             Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
             None => Ok(None),
         }
@@ -144,17 +140,23 @@ impl<
         // when uninitialized should be safe
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
-        Ok(self.db().put_cf(self.cf(), key, value)?)
+        Ok(self.db().put_cf(&**self.cf, key, value)?)
     }
 
-    pub fn put_txn(&self, txn: &DbTransaction, key: &K, value: &V) -> DynResult<()> {
+    pub fn put_txn(&self, txn: &mut Transaction<'_>, key: &K, value: &V) {
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
-        Ok(txn.put_cf(self.cf(), key, value)?)
+        txn.put_cf(self.cf, key, value);
+    }
+
+    pub fn put_txn_locked(&self, txn: &mut Transaction<'_>, key: &K, value: &V) {
+        let key = unsafe { key.as_bytes_unchecked() };
+        let value = unsafe { value.as_bytes_unchecked() };
+        txn.put_cf_locked(self.cf, key, value);
     }
 
     pub unsafe fn iter_unchecked(&self) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'db {
-        let mut raw = self.db().raw_iterator_cf(self.cf());
+        let mut raw = self.db().raw_iterator_cf(&**self.cf);
         raw.seek_to_first();
 
         struct Iter<'db, D: rocksdb::DBAccess, T: ?Sized, U: ?Sized> {
@@ -209,7 +211,7 @@ impl<
         // inference here.
         prefix: Owned<P>,
     ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'db {
-        let mut raw = self.db().raw_iterator_cf(self.cf());
+        let mut raw = self.db().raw_iterator_cf(&**self.cf);
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
         KeyValueIter::<Db, P, K, V> {
@@ -225,13 +227,13 @@ impl<
         P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
     >(
         &self,
-        txn: &'txn DbTransaction<'txn>,
+        txn: &'txn Transaction<'txn>,
         prefix: Owned<P>,
     ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'txn {
-        let mut raw = txn.raw_iterator_cf(self.cf());
+        let mut raw = txn.raw_iterator_cf(&self.cf);
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
-        KeyValueIter::<DbTransaction<'txn>, P, K, V> {
+        KeyValueIter::<Db, P, K, V> {
             raw,
             prefix,
             _t: Default::default(),
@@ -245,29 +247,10 @@ impl<
         &self,
         prefix: Owned<P>,
     ) -> impl Iterator<Item = DynResult<Owned<K>>> + 'db {
-        let mut raw = self.db().raw_iterator_cf(self.cf());
+        let mut raw = self.db().raw_iterator_cf(&**self.cf);
         raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
 
         KeyIter::<Db, P, K> {
-            raw,
-            prefix,
-            _t: Default::default(),
-            _p: Default::default(),
-        }
-    }
-
-    pub unsafe fn iter_keys_by_prefix_txn_unchecked<
-        'txn,
-        P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
-    >(
-        &self,
-        txn: &'txn DbTransaction<'txn>,
-        prefix: Owned<P>,
-    ) -> impl Iterator<Item = DynResult<Owned<K>>> + 'txn {
-        let mut raw = txn.raw_iterator_cf(self.cf());
-        raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
-
-        KeyIter::<DbTransaction<'txn>, P, K> {
             raw,
             prefix,
             _t: Default::default(),
@@ -285,8 +268,7 @@ mod tests {
     use crate::accessor::CfAccessor;
     use crate::key::{BigEndianU16, FiniteString, Packed2};
     use crate::testing::TestHarness;
-    use crate::types::DbColumnFamily;
-    use crate::Db;
+    use crate::types::{Db, DbColumnFamily};
 
     fn cf() -> DbColumnFamily {
         let mut harness = TestHarness::new();

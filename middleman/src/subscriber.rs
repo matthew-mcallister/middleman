@@ -10,9 +10,9 @@ use crate::bytes::AsBytes;
 use crate::error::DynResult;
 use crate::key::{packed, Packed2};
 use crate::model::big_tuple_struct;
-use crate::types::{Db, DbColumnFamily, DbTransaction};
+use crate::transaction::Transaction;
+use crate::types::{ColumnFamilyName, Db, DbColumnFamily};
 use crate::util::get_cf;
-use crate::ColumnFamilyName;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct SubscriberHeader {
@@ -58,9 +58,9 @@ impl SubscriberTable {
         CfAccessor::new(&self.cf)
     }
 
-    pub fn create(&self, txn: &DbTransaction, subscriber: &Subscriber) -> DynResult<()> {
+    pub fn create(&self, txn: &mut Transaction<'_>, subscriber: &Subscriber) -> DynResult<()> {
         let key = packed!(subscriber.tag(), subscriber.id());
-        self.accessor().put_txn(txn, &key, subscriber)?;
+        self.accessor().put_txn(txn, &key, subscriber);
         Ok(())
     }
 
@@ -70,14 +70,13 @@ impl SubscriberTable {
     }
 
     /// Iterates over subscribers by tag.
-    pub fn iter_by_tag<'txn>(
-        &self,
-        txn: &'txn DbTransaction<'txn>,
+    pub fn iter_by_tag<'a>(
+        &'a self,
         tag: Uuid,
-    ) -> impl Iterator<Item = DynResult<Box<Subscriber>>> + 'txn {
+    ) -> impl Iterator<Item = DynResult<Box<Subscriber>>> + 'a {
         unsafe {
             self.accessor()
-                .iter_by_prefix_txn_unchecked::<[u8; 16]>(txn, *tag.as_bytes())
+                .iter_by_prefix_unchecked::<[u8; 16]>(*tag.as_bytes())
                 .map(|e| e.map(|(_, v)| v))
         }
     }
@@ -85,12 +84,11 @@ impl SubscriberTable {
     /// Iterates over all subscribers of the given stream. This may be slow if
     /// there are a lot of subscribers for a given tag.
     pub fn iter_by_stream<'a>(
-        &self,
-        txn: &'a DbTransaction<'a>,
+        &'a self,
         tag: Uuid,
         stream: &'a str,
     ) -> impl Iterator<Item = DynResult<Box<Subscriber>>> + 'a {
-        self.iter_by_tag(txn, tag).filter_map(|item| {
+        self.iter_by_tag(tag).filter_map(|item| {
             let Ok(subscriber) = item else { return Some(item) };
             let regex = Regex::new(subscriber.stream_regex()).unwrap();
             if regex.is_match(stream) {
@@ -156,13 +154,11 @@ impl SubscriberBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use regex::Regex;
     use url::Url;
 
-    use crate::subscriber::SubscriberTable;
     use crate::testing::TestHarness;
+    use crate::transaction::Transaction;
 
     use super::SubscriberBuilder;
 
@@ -185,11 +181,10 @@ mod tests {
 
         let mut harness = TestHarness::new();
         let app = harness.application();
-        let db = &app.db;
         let subscribers = &app.subscribers;
 
-        let txn = db.transaction();
-        subscribers.create(&txn, &subscriber).unwrap();
+        let mut txn = Transaction::new(app);
+        subscribers.create(&mut txn, &subscriber).unwrap();
         txn.commit().unwrap();
 
         assert_eq!(subscribers.get(tag, id).unwrap().unwrap(), subscriber);

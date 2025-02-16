@@ -7,9 +7,9 @@ use crate::accessor::CfAccessor;
 use crate::bytes::AsBytes;
 use crate::error::DynResult;
 use crate::key::Packed2;
-use crate::types::{Db, DbColumnFamily, DbTransaction};
+use crate::transaction::Transaction;
+use crate::types::{ColumnFamilyName, Db, DbColumnFamily};
 use crate::util::get_cf;
-use crate::ColumnFamilyName;
 
 // UTC datetime with stable binary representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,10 +85,10 @@ impl DeliveryTable {
 
     pub(crate) fn create(
         &self,
-        txn: &DbTransaction,
+        txn: &mut Transaction<'_>,
         subscriber_id: Uuid,
         event_id: u64,
-    ) -> DynResult<Delivery> {
+    ) -> Delivery {
         let delivery = Delivery {
             subscriber_id,
             event_id,
@@ -96,8 +96,8 @@ impl DeliveryTable {
             next_attempt: Utc::now().into(),
             _reserved: [0; 2],
         };
-        self.accessor().put_txn(&txn, &(subscriber_id, event_id).into(), &delivery)?;
-        Ok(delivery)
+        self.accessor().put_txn(txn, &(subscriber_id, event_id).into(), &delivery);
+        delivery
     }
 
     pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> DynResult<Option<Delivery>> {
@@ -135,18 +135,18 @@ mod tests {
 
     use crate::delivery::DeliveryTable;
     use crate::testing::TestHarness;
+    use crate::transaction::Transaction;
 
     #[test]
     fn test_create_delivery() {
         let mut harness = TestHarness::new();
         let app = harness.application();
-        let db = &app.db;
         let deliveries = &app.deliveries;
 
         let subscriber_id = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let event_id: u64 = 1;
-        let txn = db.transaction();
-        let delivery = deliveries.create(&txn, subscriber_id, event_id).unwrap();
+        let mut txn = Transaction::new(app);
+        let delivery = deliveries.create(&mut txn, subscriber_id, event_id);
         txn.commit().unwrap();
 
         let delivery2 = deliveries.get(subscriber_id, event_id).unwrap().unwrap();

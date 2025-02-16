@@ -8,11 +8,11 @@ use crate::accessor::CfAccessor;
 use crate::big_tuple::{big_tuple, BigTuple};
 use crate::bytes::AsBytes;
 use crate::error::DynResult;
-use crate::key::{packed, BigEndianU64, Packed2};
+use crate::key::{packed, BigEndianU64, Packed2, Packed3};
 use crate::model::big_tuple_struct;
-use crate::types::{ContentType, Db, DbColumnFamily, DbTransaction};
+use crate::transaction::Transaction;
+use crate::types::{ColumnFamilyName, ContentType, Db, DbColumnFamily};
 use crate::util::get_cf;
-use crate::ColumnFamilyName;
 
 // TODO: ID should probably be stored on the event
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,8 +150,12 @@ impl EventTable {
     /// guaranteed to be ordered.
     // XXX: Is it possible to catch write conflicts and report those as a
     // unique status so the operation need not be retried?
-    pub fn create(&self, txn: &DbTransaction<'_>, event: &Event) -> DynResult<u64> {
+    pub fn create(&self, txn: &mut Transaction<'_>, event: &Event) -> DynResult<u64> {
         let (tag, idempotency_key) = (event.tag(), event.idempotency_key());
+
+        // Acquire lock
+        let key: Packed3<[u8; 5], Uuid, Uuid> = (*b"event", tag, idempotency_key).into();
+        txn.lock_key(AsBytes::as_bytes(&key).into())?;
 
         // Try to fetch existing record by idempotency key
         let existing_id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
@@ -161,15 +165,15 @@ impl EventTable {
 
         // Create primary record
         let id = self.event_sequence_number.fetch_add(1, Ordering::Relaxed);
-        self.accessor().put_txn(txn, &id.into(), &event)?;
+        self.accessor().put_txn(txn, &id.into(), &event);
 
         // Index by tag + idempotency key
         let key = packed!(tag, idempotency_key);
-        self.tag_idempotency_index_accessor().put_txn(txn, &key, &id)?;
+        self.tag_idempotency_index_accessor().put_txn(txn, &key, &id);
 
         // Index by tag + stream
         let key = EventStreamIndexKey::new(&tag, event.stream(), &id.into());
-        self.tag_stream_index_accessor().put_txn(txn, &key, &())?;
+        self.tag_stream_index_accessor().put_txn(txn, &key, &());
 
         Ok(id)
     }
@@ -181,7 +185,7 @@ impl EventTable {
 
     pub fn get_id_by_idempotency_key(
         &self,
-        txn: &DbTransaction,
+        txn: &mut Transaction<'_>,
         tag: Uuid,
         idempotency_key: Uuid,
     ) -> DynResult<Option<u64>> {
@@ -195,7 +199,7 @@ impl EventTable {
 
     pub fn get_by_idempotency_key(
         &self,
-        txn: &DbTransaction,
+        txn: &mut Transaction<'_>,
         tag: Uuid,
         idempotency_key: Uuid,
     ) -> DynResult<Option<(u64, Box<Event>)>> {
@@ -225,11 +229,11 @@ impl EventTable {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
+    use crate::error::ErrorKind;
     use crate::testing::TestHarness;
+    use crate::transaction::Transaction;
 
-    use super::{ContentType, Event, EventBuilder, EventTable};
+    use super::{ContentType, Event, EventBuilder};
 
     #[test]
     fn test_builder() {
@@ -265,12 +269,11 @@ mod tests {
     fn test_create() {
         let mut harness = TestHarness::new();
         let app = harness.application();
-        let db = &app.db;
         let events = &app.events;
 
         let event = testing_event();
-        let txn = db.transaction();
-        let id = events.create(&txn, &event).unwrap();
+        let mut txn = Transaction::new(app);
+        let id = events.create(&mut txn, &event).unwrap();
         txn.commit().unwrap();
 
         let event2 = events.get(id).unwrap().unwrap();
@@ -283,23 +286,22 @@ mod tests {
     fn test_idempotency() {
         let mut harness = TestHarness::new();
         let app = harness.application();
-        let db = &app.db;
         let events = &app.events;
 
         let event = testing_event();
-        let txn = db.transaction();
-        let id = events.create(&txn, &event).unwrap();
+        let mut txn = Transaction::new(app);
+        let id = events.create(&mut txn, &event).unwrap();
         txn.commit().unwrap();
 
-        let txn = db.transaction();
-        let id2 = events.create(&txn, &event).unwrap();
+        let mut txn = Transaction::new(app);
+        let id2 = events.create(&mut txn, &event).unwrap();
         txn.commit().unwrap();
         assert_eq!(id, id2);
 
         // Also test lookup by idempotency key
-        let txn = db.transaction();
+        let mut txn = Transaction::new(app);
         let (id2, event2) = events
-            .get_by_idempotency_key(&txn, event.tag(), event.idempotency_key())
+            .get_by_idempotency_key(&mut txn, event.tag(), event.idempotency_key())
             .unwrap()
             .unwrap();
         assert_eq!(id, id2);
@@ -307,36 +309,13 @@ mod tests {
         txn.commit().unwrap();
     }
 
-    /// When the same event is committed in two (snapshot) transactions,
-    /// one of the transactions will fail.
-    #[test]
-    #[should_panic]
-    fn test_idempotency_conflict() {
-        let mut harness = TestHarness::new();
-        let app = harness.application();
-        let db = &app.db;
-        let events = &app.events;
-
-        let event = testing_event();
-        let mut opts = rocksdb::OptimisticTransactionOptions::new();
-        opts.set_snapshot(true);
-
-        let txn1 = db.transaction_opt(&Default::default(), &opts);
-        let txn2 = db.transaction_opt(&Default::default(), &opts);
-        events.create(&txn1, &event).unwrap();
-        events.create(&txn2, &event).unwrap();
-        txn1.commit().unwrap();
-        txn2.commit().unwrap();
-    }
-
     #[test]
     fn test_iter_by_stream() {
         let mut harness = TestHarness::new();
         let app = harness.application();
-        let db = &app.db;
         let events = &app.events;
 
-        let txn = db.transaction();
+        let mut txn = Transaction::new(app);
         let mut base = EventBuilder::new();
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         base.content_type(ContentType::Json).tag(tag);
@@ -346,33 +325,50 @@ mod tests {
             .payload(b"1")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"))
             .build();
-        let id1 = events.create(&txn, &event1).unwrap();
+        let id1 = events.create(&mut txn, &event1).unwrap();
         let event2 = base
             .clone()
             .stream("stream0")
             .payload(b"2")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000002"))
             .build();
-        let _id2 = events.create(&txn, &event2).unwrap();
+        let _id2 = events.create(&mut txn, &event2).unwrap();
         let event3 = base
             .clone()
             .stream("stream1")
             .payload(b"3")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000003"))
             .build();
-        let id3 = events.create(&txn, &event3).unwrap();
+        let id3 = events.create(&mut txn, &event3).unwrap();
         let event4 = base
             .clone()
             .stream("strm2")
             .payload(b"4")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000004"))
             .build();
-        let _id4 = events.create(&txn, &event4).unwrap();
+        let _id4 = events.create(&mut txn, &event4).unwrap();
         txn.commit().unwrap();
 
         let mut iter = events.iter_by_stream(tag, "stream1");
         assert_eq!(iter.next().unwrap().unwrap(), (id1, event1));
         assert_eq!(iter.next().unwrap().unwrap(), (id3, event3));
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_lock_race() {
+        let mut harness = TestHarness::new();
+        let app = harness.application();
+        let events = &app.events;
+
+        let event = testing_event();
+        let mut txn1 = Transaction::new(app);
+        events.create(&mut txn1, &event).unwrap();
+
+        let mut txn2 = Transaction::new(app);
+        assert_eq!(
+            events.create(&mut txn2, &event).unwrap_err().kind(),
+            ErrorKind::Busy
+        );
     }
 }

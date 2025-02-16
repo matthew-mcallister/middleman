@@ -228,6 +228,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ac0150caa2ae65ca5bd83f25c7de183dea78d4d366469f148435e2acfbad0da"
 
 [[package]]
+name = "byteview"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9f101f5d5ac7c27fa7e664bbdc2697b2627f24c701e1309564840c67554dbcc"
+
+[[package]]
 name = "bzip2-sys"
 version = "0.1.11+1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -983,6 +989,7 @@ dependencies = [
  "axum",
  "bitflags",
  "byteorder",
+ "byteview",
  "chrono",
  "clap",
  "compact_str",
