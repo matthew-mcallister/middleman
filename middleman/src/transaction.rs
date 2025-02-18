@@ -1,10 +1,7 @@
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 use byteview::ByteView;
-use parking_lot::Mutex;
+use dashmap::{DashMap, Entry};
 use rocksdb::WriteBatchWithTransaction;
 use tokio::time::Instant;
 
@@ -12,116 +9,92 @@ use crate::error::{ErrorKind, Result};
 use crate::types::{Db, DbColumnFamily};
 use crate::Application;
 
-// Align to half a cache line to reduce false sharing.
-#[derive(Debug)]
-#[repr(align(32))]
-struct Shard {
-    /// Map transaction IDs to acquisition time. Acquisition time is only
-    /// needed to perform leak detection.
-    transactions: Mutex<HashMap<ByteView, Instant>>,
-    lock_expiration: std::time::Duration,
-}
-
-#[derive(Debug)]
-pub(crate) struct LockGuard<'a> {
-    transaction_id: ByteView,
-    shard: &'a Shard,
-}
-
-impl<'a> Drop for LockGuard<'a> {
-    fn drop(&mut self) {
-        self.shard.transactions.lock().remove(&self.transaction_id);
-    }
-}
-
-impl Shard {
-    fn new(lock_expiration: Duration) -> Self {
-        Self {
-            transactions: Default::default(),
-            lock_expiration,
-        }
-    }
-
-    fn acquire<'a>(self: &'a Self, transaction_id: ByteView) -> Option<LockGuard<'a>> {
-        let mut transactions = self.transactions.lock();
-        match transactions.entry(transaction_id.clone()) {
-            Entry::Occupied(_) => None,
-            Entry::Vacant(e) => {
-                e.insert(Instant::now());
-                Some(LockGuard {
-                    transaction_id,
-                    shard: self,
-                })
-            },
-        }
-    }
-
-    fn recycle_leaks(&self) {
-        let now = Instant::now();
-        self.transactions.lock().retain(|_, v| now.duration_since(*v) < self.lock_expiration);
-    }
-}
-
-const NUM_SHARDS: usize = 8;
-
 /// This is a lightweight lock that serves as a pessimistic transaction
 /// conflict resolution mechanism. Attempting to acquire a lock held by an
 /// existing transaction will simply fail.
 ///
 /// To prevent resource leaks, locks will expire after a configurable timeout.
-// XXX: Instead of reimplementing leak detection in multiple places, maybe
-// register them inside a "session" struct and do leak detection on that.
-// This is basically how a database does resource management with connections.
+// TODO: Unified resource leak detection
 #[derive(Debug)]
 pub(crate) struct TransactionLock {
-    shards: [Shard; NUM_SHARDS],
+    lock_expiration: std::time::Duration,
+    keys: DashMap<ByteView, Instant>,
 }
 
 impl TransactionLock {
     pub(crate) fn new(lock_expiration: Duration) -> Self {
         Self {
-            shards: std::array::from_fn(|_| Shard::new(lock_expiration)),
+            lock_expiration,
+            keys: Default::default(),
         }
     }
 
-    /// Acquires a transaction lock. Any other transaction which try to acquire
-    /// this key while it is locked will fail.
-    pub(crate) fn acquire(&self, key: ByteView) -> Option<LockGuard<'_>> {
-        let mut hasher: DefaultHasher = DefaultHasher::default();
-        key.hash(&mut hasher);
-        let hash = hasher.finish();
-        let shard_index = hash as usize % NUM_SHARDS;
-        self.shards[shard_index].acquire(key)
+    pub(crate) fn acquire(&self, key: ByteView) -> bool {
+        match self.keys.entry(key) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(e) => {
+                e.insert(Instant::now());
+                true
+            },
+        }
+    }
+
+    pub(crate) fn release(&self, key: &ByteView) {
+        // FIXME: Lock could be held by a different transaction if it leaked
+        self.keys.remove(key);
     }
 
     pub(crate) fn recycle_leaks(&self) {
-        self.shards.iter().for_each(Shard::recycle_leaks);
+        let now = Instant::now();
+        self.keys.retain(|_, v| now.duration_since(*v) < self.lock_expiration);
+    }
+}
+
+// Wrapper to handle destructor
+struct Locks<'app> {
+    app: &'app Application,
+    keys: Vec<ByteView>,
+}
+
+impl<'app> Drop for Locks<'app> {
+    fn drop(&mut self) {
+        for key in self.keys.iter() {
+            self.app.transaction_lock.release(key);
+        }
     }
 }
 
 /// An atomic DB transaction with optional locking.
 // XXX: Instead of locking a single key, just have a "lock for update" method
-pub(crate) struct Transaction<'t> {
-    pub(crate) app: &'t Application,
-    pub(crate) db: &'t Db,
-    pub(crate) write_batch: rocksdb::WriteBatchWithTransaction<true>,
-    pub(crate) guards: Vec<LockGuard<'t>>,
+pub(crate) struct Transaction<'app> {
+    db: &'app Db,
+    locks: Locks<'app>,
+    write_batch: rocksdb::WriteBatchWithTransaction<true>,
 }
 
-impl<'t> Transaction<'t> {
-    pub(crate) fn new(app: &'t Application) -> Self {
+impl<'app> Transaction<'app> {
+    pub(crate) fn new(app: &'app Application) -> Self {
         Self {
             db: &app.db,
-            app,
             write_batch: WriteBatchWithTransaction::new(),
-            guards: Vec::new(),
+            locks: Locks {
+                app,
+                keys: Vec::new(),
+            },
         }
     }
 
+    pub(crate) fn app(&self) -> &Application {
+        self.locks.app
+    }
+
     pub(crate) fn lock_key(&mut self, key: ByteView) -> Result<()> {
-        let guard = self.app.transaction_lock.acquire(key).ok_or(ErrorKind::Busy)?;
-        self.guards.push(guard);
-        Ok(())
+        if self.app().transaction_lock.acquire(key.clone()) {
+            self.locks.keys.push(key);
+            Ok(())
+        } else {
+            Err(ErrorKind::Busy)?
+        }
     }
 
     pub(crate) fn get_cf(
