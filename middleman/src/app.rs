@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use uuid::Uuid;
+
 use crate::config::Config;
 use crate::delivery::DeliveryTable;
 use crate::error::DynResult;
@@ -93,7 +95,7 @@ mod tests {
             .build();
         let id = app.create_event(&event).unwrap();
 
-        let event2 = app.events.get(id).unwrap().unwrap();
+        let event2 = app.events.get(tag, id).unwrap().unwrap();
         assert_eq!(*event, *event2);
 
         let id2 = app.create_event(&event).unwrap();

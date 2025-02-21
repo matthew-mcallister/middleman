@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::accessor::CfAccessor;
 use crate::bytes::AsBytes;
+use crate::cursor::Cursor;
 use crate::error::DynResult;
 use crate::key::{packed, Packed2};
 use crate::model::big_tuple_struct;
@@ -75,9 +76,7 @@ impl SubscriberTable {
         tag: Uuid,
     ) -> impl Iterator<Item = DynResult<Box<Subscriber>>> + 'a {
         unsafe {
-            self.accessor()
-                .iter_by_prefix_unchecked::<[u8; 16]>(*tag.as_bytes())
-                .map(|e| e.map(|(_, v)| v))
+            self.accessor().cursor_unchecked().prefix_iter::<[u8; 16]>(*tag.as_bytes()).values()
         }
     }
 

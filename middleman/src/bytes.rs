@@ -26,7 +26,8 @@ pub trait FromBytesUnchecked {
 }
 
 /// A version of `FromBytesUnchecked` that creates a copy.
-// TODO: Sighhhhhhhhh might want to support ByteView instead of Box
+// TODO: Sighhhhhhhhh might want to support ByteView instead of Box. fjall will
+// solve this problem.
 pub trait OwnedFromBytesUnchecked: FromBytesUnchecked + ToOwned {
     /// Returns an owned copy of the object encoded in the given byte slice.
     /// This method must succeed even if the input byte slice is unaligned as

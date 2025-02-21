@@ -107,7 +107,7 @@ impl DeliveryTable {
     pub(crate) fn iter<'a>(
         &'a self,
     ) -> impl Iterator<Item = DynResult<(DeliveryKey, Delivery)>> + 'a {
-        unsafe { self.accessor().iter_unchecked() }
+        unsafe { self.accessor().cursor_unchecked().into_iter() }
     }
 }
 
@@ -131,9 +131,6 @@ impl Delivery {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use crate::delivery::DeliveryTable;
     use crate::testing::TestHarness;
     use crate::transaction::Transaction;
 

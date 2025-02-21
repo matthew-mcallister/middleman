@@ -1,13 +1,10 @@
-use std::borrow::Borrow;
 use std::marker::PhantomData;
 
-use rocksdb::DBAccess;
-
-use crate::bytes::{AsRawBytes, FromBytesUnchecked, OwnedFromBytesUnchecked};
+use crate::bytes::{AsRawBytes, OwnedFromBytesUnchecked};
+use crate::cursor::BaseCursor;
 use crate::error::DynResult;
-use crate::prefix::IsPrefixOf;
 use crate::transaction::Transaction;
-use crate::types::{Db, DbColumnFamily, Owned, Owned2};
+use crate::types::{Db, DbColumnFamily};
 
 pub struct CfAccessor<
     'db,
@@ -17,84 +14,6 @@ pub struct CfAccessor<
     cf: &'db DbColumnFamily,
     _k: PhantomData<*const K>,
     _v: PhantomData<*const V>,
-}
-
-struct KeyValueIter<'db, D: rocksdb::DBAccess, P: ToOwned + ?Sized, T: ?Sized, U: ?Sized> {
-    raw: rocksdb::DBRawIteratorWithThreadMode<'db, D>,
-    prefix: Owned<P>,
-    _t: std::marker::PhantomData<*const T>,
-    _u: std::marker::PhantomData<*const U>,
-}
-
-impl<
-        'db,
-        D: rocksdb::DBAccess,
-        P: ToOwned + IsPrefixOf<T> + ?Sized,
-        T: OwnedFromBytesUnchecked + ToOwned + ?Sized,
-        U: OwnedFromBytesUnchecked + ToOwned + ?Sized,
-    > Iterator for KeyValueIter<'db, D, P, T, U>
-{
-    type Item = DynResult<Owned2<T, U>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.raw.valid() {
-            match self.raw.status() {
-                Ok(_) => return None,
-                Err(e) => return Some(Err(e.into())),
-            }
-        }
-
-        // FIXME: There should be a static assertion that T has alignment 1
-        // because we are casting unaligned memory.
-        let key = unsafe { T::ref_from_bytes_unchecked(self.raw.key()?) };
-        if !self.prefix.borrow().is_prefix_of(key) {
-            return None;
-        }
-
-        let key = key.to_owned();
-        let value = unsafe { U::owned_from_bytes_unchecked(self.raw.value()?) };
-
-        self.raw.next();
-
-        Some(Ok((key, value)))
-    }
-}
-
-struct KeyIter<'db, D: DBAccess, P: ToOwned + ?Sized, T: ?Sized> {
-    raw: rocksdb::DBRawIteratorWithThreadMode<'db, D>,
-    prefix: Owned<P>,
-    _t: std::marker::PhantomData<*const T>,
-    _p: std::marker::PhantomData<*const P>,
-}
-
-impl<
-        'db,
-        D: DBAccess,
-        P: ToOwned + IsPrefixOf<T> + ?Sized,
-        T: FromBytesUnchecked + ToOwned + ?Sized,
-    > Iterator for KeyIter<'db, D, P, T>
-{
-    type Item = DynResult<Owned<T>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.raw.valid() {
-            match self.raw.status() {
-                Ok(_) => return None,
-                Err(e) => return Some(Err(e.into())),
-            }
-        }
-
-        let key = unsafe { T::ref_from_bytes_unchecked(self.raw.key()?) };
-        if !self.prefix.borrow().is_prefix_of(key) {
-            return None;
-        }
-
-        let key = key.to_owned();
-
-        self.raw.next();
-
-        Some(Ok(key))
-    }
 }
 
 impl<
@@ -137,7 +56,7 @@ impl<
 
     pub fn put(&self, key: &K, value: &V) -> DynResult<()> {
         // This is technically UB; the rocksdb crate requires initialized bytes
-        // when uninitialized should be safe
+        // though uninitialized bytes should be safe
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
         Ok(self.db().put_cf(&**self.cf, key, value)?)
@@ -155,107 +74,8 @@ impl<
         txn.put_cf_locked(self.cf, key, value);
     }
 
-    pub unsafe fn iter_unchecked(&self) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'db {
-        let mut raw = self.db().raw_iterator_cf(&**self.cf);
-        raw.seek_to_first();
-
-        struct Iter<'db, D: rocksdb::DBAccess, T: ?Sized, U: ?Sized> {
-            raw: rocksdb::DBRawIteratorWithThreadMode<'db, D>,
-            _t: std::marker::PhantomData<*const T>,
-            _u: std::marker::PhantomData<*const U>,
-        }
-
-        impl<
-                'db,
-                D: rocksdb::DBAccess,
-                T: OwnedFromBytesUnchecked + ToOwned + ?Sized,
-                U: OwnedFromBytesUnchecked + ToOwned + ?Sized,
-            > Iterator for Iter<'db, D, T, U>
-        {
-            type Item = DynResult<Owned2<T, U>>;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                if !self.raw.valid() {
-                    match self.raw.status() {
-                        Ok(_) => return None,
-                        Err(e) => return Some(Err(e.into())),
-                    }
-                }
-
-                let key = unsafe { T::owned_from_bytes_unchecked(self.raw.key()?) };
-                let value = unsafe { U::owned_from_bytes_unchecked(self.raw.value()?) };
-
-                self.raw.next();
-
-                Some(Ok((key, value)))
-            }
-        }
-
-        Iter::<_, K, V> {
-            raw,
-            _t: Default::default(),
-            _u: Default::default(),
-        }
-    }
-
-    // TODO: Convert to a streaming iterator to eliminate copies
-    pub unsafe fn iter_by_prefix_unchecked<
-        P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
-    >(
-        &self,
-        // XXX: The mapping `P -> Owned<P>` is not invertible; there may be
-        // multiple possible `P` with the same `Owned<P>`. Therefore, type
-        // inference doesn't work for this method. However, you can't just take
-        // `prefix: P` either because then this breaks the call to
-        // `prefix.as_bytes_unchecked()`. I'm at a loss for how to fix type
-        // inference here.
-        prefix: Owned<P>,
-    ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'db {
-        let mut raw = self.db().raw_iterator_cf(&**self.cf);
-        raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
-
-        KeyValueIter::<Db, P, K, V> {
-            raw,
-            prefix,
-            _t: Default::default(),
-            _u: Default::default(),
-        }
-    }
-
-    pub unsafe fn iter_by_prefix_txn_unchecked<
-        'txn,
-        P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
-    >(
-        &self,
-        txn: &'txn Transaction<'txn>,
-        prefix: Owned<P>,
-    ) -> impl Iterator<Item = DynResult<Owned2<K, V>>> + 'txn {
-        let mut raw = txn.raw_iterator_cf(&self.cf);
-        raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
-
-        KeyValueIter::<Db, P, K, V> {
-            raw,
-            prefix,
-            _t: Default::default(),
-            _u: Default::default(),
-        }
-    }
-
-    pub unsafe fn iter_keys_by_prefix_unchecked<
-        P: ToOwned + AsRawBytes + IsPrefixOf<K> + ?Sized + 'static,
-    >(
-        &self,
-        prefix: Owned<P>,
-    ) -> impl Iterator<Item = DynResult<Owned<K>>> + 'db {
-        let mut raw = self.db().raw_iterator_cf(&**self.cf);
-        raw.seek(unsafe { prefix.borrow().as_bytes_unchecked() });
-
-        KeyIter::<Db, P, K> {
-            raw,
-            prefix,
-            _t: Default::default(),
-            _p: Default::default(),
-        }
+    pub unsafe fn cursor_unchecked(&self) -> BaseCursor<'db, K, V> {
+        BaseCursor::<'_, K, V>::new(self.db().raw_iterator_cf(&**self.cf))
     }
 }
 
@@ -330,13 +150,15 @@ mod tests {
         accessor.put(&key3, &value3).unwrap();
 
         let prefix = 1u16.to_be_bytes();
-        let mut iter = unsafe { accessor.iter_by_prefix_unchecked::<[u8; 2]>(prefix) };
+        let mut iter =
+            unsafe { accessor.cursor_unchecked().prefix_iter::<[u8; 2]>(prefix).into_iter() };
         assert_eq!(iter.next().unwrap().unwrap(), (key1, value1));
         let next = iter.next();
         assert!(next.is_none());
 
         let prefix = 2u16.to_be_bytes();
-        let mut iter = unsafe { accessor.iter_by_prefix_unchecked::<[u8; 2]>(prefix) };
+        let mut iter =
+            unsafe { accessor.cursor_unchecked().prefix_iter::<[u8; 2]>(prefix).into_iter() };
         assert_eq!(iter.next().unwrap().unwrap(), (key2, value2));
         assert_eq!(iter.next().unwrap().unwrap(), (key3, value3));
         assert!(iter.next().is_none());

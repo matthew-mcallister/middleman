@@ -2,11 +2,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::accessor::CfAccessor;
 use crate::big_tuple::{big_tuple, BigTuple};
 use crate::bytes::AsBytes;
+use crate::cursor::Cursor;
 use crate::error::DynResult;
 use crate::key::{packed, BigEndianU64, Packed2, Packed3};
 use crate::model::big_tuple_struct;
@@ -46,6 +48,21 @@ impl Event {
 
     pub fn tag(&self) -> Uuid {
         self.header().tag
+    }
+}
+
+impl Serialize for Event {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Event", 4)?;
+        state.serialize_field("idempotency_key", &self.idempotency_key())?;
+        state.serialize_field("tag", &self.tag())?;
+        state.serialize_field("stream", self.stream())?;
+        state.serialize_field("payload", self.payload())?;
+        state.end()
     }
 }
 
@@ -133,7 +150,7 @@ impl EventTable {
         })
     }
 
-    fn accessor<'a>(&'a self) -> CfAccessor<'a, BigEndianU64, Event> {
+    fn accessor<'a>(&'a self) -> CfAccessor<'a, Packed2<Uuid, BigEndianU64>, Event> {
         CfAccessor::new(&self.cf)
     }
 
@@ -165,7 +182,7 @@ impl EventTable {
 
         // Create primary record
         let id = self.event_sequence_number.fetch_add(1, Ordering::Relaxed);
-        self.accessor().put_txn(txn, &id.into(), &event);
+        self.accessor().put_txn(txn, &packed!(tag, id.into()), &event);
 
         // Index by tag + idempotency key
         let key = packed!(tag, idempotency_key);
@@ -178,9 +195,10 @@ impl EventTable {
         Ok(id)
     }
 
-    pub fn get(&self, id: u64) -> DynResult<Option<Box<Event>>> {
+    pub fn get(&self, tag: Uuid, id: u64) -> DynResult<Option<Box<Event>>> {
         // XXX: Is pinning the slice here a performance win? In which cases?
-        unsafe { self.accessor().get_unchecked(&id.into()) }
+        let key = packed!(tag, id.into());
+        unsafe { self.accessor().get_unchecked(&key) }
     }
 
     pub fn get_id_by_idempotency_key(
@@ -205,25 +223,41 @@ impl EventTable {
     ) -> DynResult<Option<(u64, Box<Event>)>> {
         let id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
         let Some(id) = id else { return Ok(None) };
-        let Some(event) = self.get(id)? else { return Ok(None) };
+        let Some(event) = self.get(tag, id)? else { return Ok(None) };
         Ok(Some((id, event)))
+    }
+
+    pub fn iter_by_tag<'a>(
+        &'a self,
+        tag: Uuid,
+        starting_id: u64,
+    ) -> impl Iterator<Item = DynResult<(u64, Box<Event>)>> + 'a {
+        let mut cursor = unsafe { self.accessor().cursor_unchecked() };
+        cursor.seek(&packed!(tag, starting_id.into()));
+        cursor.prefix::<[u8; 16]>(*tag.as_bytes()).into_iter().map(move |item| {
+            let (key, value) = item?;
+            let id = key.1;
+            Ok((id.into(), value))
+        })
     }
 
     pub fn iter_by_stream<'a>(
         &'a self,
         tag: Uuid,
         stream: &str,
+        starting_id: u64,
     ) -> impl Iterator<Item = DynResult<(u64, Box<Event>)>> + 'a {
         let prefix = big_tuple!(&tag, stream);
-        unsafe {
-            self.tag_stream_index_accessor().iter_keys_by_prefix_unchecked::<BigTuple>(prefix).map(
-                move |key| {
-                    let id = *key?.id();
-                    let event = self.accessor().get_unchecked(&id)?.unwrap();
-                    Ok((id.into(), event))
-                },
-            )
-        }
+        let mut cursor = unsafe { self.tag_stream_index_accessor().cursor_unchecked() };
+        let seek_to = EventStreamIndexKey::new(&tag, stream, &starting_id.into());
+        cursor.seek(&seek_to);
+        cursor.prefix::<BigTuple>(prefix).keys().map(move |key| {
+            let id = *key?.id();
+            // XXX: These access are monotonic and should be highly coherent.
+            // Is there a way to make them faster?
+            let event = self.get(tag, id.into())?.unwrap();
+            Ok((id.into(), event))
+        })
     }
 }
 
@@ -276,7 +310,7 @@ mod tests {
         let id = events.create(&mut txn, &event).unwrap();
         txn.commit().unwrap();
 
-        let event2 = events.get(id).unwrap().unwrap();
+        let event2 = events.get(event.tag(), id).unwrap().unwrap();
         assert_eq!(&*event, &*event2);
     }
 
@@ -349,7 +383,7 @@ mod tests {
         let _id4 = events.create(&mut txn, &event4).unwrap();
         txn.commit().unwrap();
 
-        let mut iter = events.iter_by_stream(tag, "stream1");
+        let mut iter = events.iter_by_stream(tag, "stream1", 0);
         assert_eq!(iter.next().unwrap().unwrap(), (id1, event1));
         assert_eq!(iter.next().unwrap().unwrap(), (id3, event3));
         assert!(iter.next().is_none());

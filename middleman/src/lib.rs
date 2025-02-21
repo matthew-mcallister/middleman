@@ -6,6 +6,7 @@ pub mod bytes;
 pub mod comparator;
 pub mod config;
 pub mod connection;
+pub mod cursor;
 pub mod delivery;
 pub mod error;
 pub mod event;
