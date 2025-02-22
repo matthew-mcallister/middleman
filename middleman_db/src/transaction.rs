@@ -3,18 +3,19 @@ use std::time::Duration;
 use byteview::ByteView;
 use dashmap::{DashMap, Entry};
 use rocksdb::WriteBatchWithTransaction;
-use tokio::time::Instant;
+use std::time::Instant;
 
-use crate::error::{ErrorKind, Result};
-use crate::types::{Db, DbColumnFamily};
-use crate::Application;
+use crate::column_family::ColumnFamily;
+use crate::db::Db;
+use crate::error::{Error, Result};
+use crate::RawDb;
 
 /// This is a lightweight lock that serves as a pessimistic transaction
 /// conflict resolution mechanism. Attempting to acquire a lock held by an
 /// existing transaction will simply fail.
 ///
 /// To prevent resource leaks, locks will expire after a configurable timeout.
-// TODO: Unified resource leak detection
+// TODO: Instead of an expiration, support deleting by transaction ID.
 #[derive(Debug)]
 pub(crate) struct TransactionLock {
     lock_expiration: std::time::Duration,
@@ -51,63 +52,63 @@ impl TransactionLock {
 }
 
 // Wrapper to handle destructor
-struct Locks<'app> {
-    app: &'app Application,
+struct Locks<'db> {
+    db: &'db Db,
     keys: Vec<ByteView>,
 }
 
-impl<'app> Drop for Locks<'app> {
+impl<'db> Drop for Locks<'db> {
     fn drop(&mut self) {
         for key in self.keys.iter() {
-            self.app.transaction_lock.release(key);
+            self.db.transaction_lock.release(key);
         }
     }
 }
 
 /// An atomic DB transaction with optional locking.
 // XXX: Instead of locking a single key, just have a "lock for update" method
-pub(crate) struct Transaction<'app> {
-    db: &'app Db,
-    locks: Locks<'app>,
+pub struct Transaction<'db> {
+    db: &'db Db,
+    locks: Locks<'db>,
     write_batch: rocksdb::WriteBatchWithTransaction<true>,
 }
 
-impl<'app> Transaction<'app> {
-    pub(crate) fn new(app: &'app Application) -> Self {
+impl<'db> Transaction<'db> {
+    pub fn new(db: &'db Db) -> Self {
         Self {
-            db: &app.db,
+            db,
             write_batch: WriteBatchWithTransaction::new(),
             locks: Locks {
-                app,
+                db,
                 keys: Vec::new(),
             },
         }
     }
 
-    pub(crate) fn app(&self) -> &Application {
-        self.locks.app
+    pub fn db(&self) -> &Db {
+        self.locks.db
     }
 
     pub(crate) fn lock_key(&mut self, key: ByteView) -> Result<()> {
-        if self.app().transaction_lock.acquire(key.clone()) {
+        if self.db().transaction_lock.acquire(key.clone()) {
             self.locks.keys.push(key);
             Ok(())
         } else {
-            Err(ErrorKind::Busy)?
+            Err(Error::TransactionConflict)
         }
     }
 
     pub(crate) fn get_cf(
         &self,
-        cf: &DbColumnFamily,
+        cf: &ColumnFamily,
         key: impl AsRef<[u8]>,
     ) -> Result<Option<Vec<u8>>> {
-        Ok(self.db.get_cf(&**cf, key)?)
+        Ok(self.db.raw.get_cf(&**cf, key)?)
     }
 
     pub(crate) fn put_cf(
         &mut self,
-        cf: &DbColumnFamily,
+        cf: &ColumnFamily,
         key: impl AsRef<[u8]>,
         value: impl AsRef<[u8]>,
     ) {
@@ -116,7 +117,7 @@ impl<'app> Transaction<'app> {
 
     pub(crate) fn put_cf_locked(
         &mut self,
-        cf: &DbColumnFamily,
+        cf: &ColumnFamily,
         key: impl AsRef<[u8]>,
         value: impl AsRef<[u8]>,
     ) -> Result<()> {
@@ -127,12 +128,12 @@ impl<'app> Transaction<'app> {
 
     pub(crate) fn raw_iterator_cf<'a>(
         &'a self,
-        cf: &DbColumnFamily,
-    ) -> rocksdb::DBRawIteratorWithThreadMode<'a, Db> {
-        self.db.raw_iterator_cf(&**cf)
+        cf: &ColumnFamily,
+    ) -> rocksdb::DBRawIteratorWithThreadMode<'a, RawDb> {
+        self.db.raw.raw_iterator_cf(&**cf)
     }
 
-    pub(crate) fn commit(self) -> Result<()> {
-        Ok(self.db.write(self.write_batch)?)
+    pub fn commit(self) -> Result<()> {
+        Ok(self.db.raw.write(self.write_batch)?)
     }
 }

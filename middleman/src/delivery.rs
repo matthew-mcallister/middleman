@@ -5,10 +5,10 @@ use uuid::Uuid;
 
 use crate::accessor::CfAccessor;
 use crate::bytes::AsBytes;
-use crate::error::DynResult;
+use crate::error::Result;
 use crate::key::Packed2;
 use crate::transaction::Transaction;
-use crate::types::{ColumnFamilyName, Db, DbColumnFamily};
+use crate::types::{ColumnFamily, ColumnFamilyName, Db};
 use crate::util::get_cf;
 
 // UTC datetime with stable binary representation.
@@ -68,13 +68,13 @@ pub struct Delivery {
 unsafe impl AsBytes for Delivery {}
 
 pub struct DeliveryTable {
-    cf: DbColumnFamily,
+    cf: ColumnFamily,
 }
 
 type DeliveryKey = Packed2<Uuid, u64>;
 
 impl DeliveryTable {
-    pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
+    pub(crate) fn new(db: Arc<Db>) -> Result<Self> {
         let cf = get_cf(db, ColumnFamilyName::Deliveries);
         Ok(Self { cf })
     }
@@ -100,13 +100,11 @@ impl DeliveryTable {
         delivery
     }
 
-    pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> DynResult<Option<Delivery>> {
+    pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> Result<Option<Delivery>> {
         unsafe { Ok(self.accessor().get_unchecked(&(subscriber_id, event_id).into())?.map(|x| *x)) }
     }
 
-    pub(crate) fn iter<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = DynResult<(DeliveryKey, Delivery)>> + 'a {
+    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = Result<(DeliveryKey, Delivery)>> + 'a {
         unsafe { self.accessor().cursor_unchecked().into_iter() }
     }
 }

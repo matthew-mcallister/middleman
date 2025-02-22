@@ -2,5 +2,6 @@
 resolver = "2"
 members = [
     "middleman",
-    "middleman_macros"
+    "middleman_macros",
+    "middleman_db"
 ]

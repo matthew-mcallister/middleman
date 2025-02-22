@@ -130,6 +130,7 @@ impl_packed_tuple!(Packed4, T, U, V, W);
 impl_packed_tuple!(Packed5, T, U, V, W, X);
 impl_packed_tuple!(Packed6, T, U, V, W, X, Y);
 
+#[macro_export]
 macro_rules! packed {
     ($_0:expr) => {
         $_0
@@ -151,7 +152,7 @@ macro_rules! packed {
     };
 }
 
-pub(crate) use packed;
+pub use packed;
 
 macro_rules! impl_bytes_as_prefix_of_packed_tuple {
     ($PackedN:ident<$($T:ident),*>) => {
@@ -170,6 +171,7 @@ impl_bytes_as_prefix_of_packed_tuple!(Packed5<T, U, V, W, X>);
 impl_bytes_as_prefix_of_packed_tuple!(Packed6<T, U, V, W, X, Y>);
 
 // Implements some boilerplate
+#[macro_export]
 macro_rules! dst_key {
     (
         $(#[$($meta:tt)*])*
@@ -241,23 +243,25 @@ macro_rules! dst_key {
     };
 }
 
-pub(crate) use dst_key;
+pub use dst_key;
 
 #[cfg(test)]
 mod tests {
     use crate::bytes::{AsBytes, FromBytesUnchecked};
-    use middleman_macros::db_key;
 
     use super::*;
 
     #[test]
     fn test_key_macro() {
-        #[db_key]
+        #[repr(packed)]
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         struct MyKey {
             a: BigEndianU16,
             b: FiniteString<4>,
             c: BigEndianU16,
         }
+
+        unsafe impl AsBytes for MyKey {}
 
         let key = MyKey {
             a: 1.into(),

@@ -27,9 +27,6 @@ pub(crate) enum ErrorKind {
 
 pub type Result<T> = StdResult<T, Error>;
 
-pub type DynError = Error;
-pub type DynResult<T> = Result<T>;
-
 impl ErrorKind {
     fn status_code(&self) -> StatusCode {
         unsafe {

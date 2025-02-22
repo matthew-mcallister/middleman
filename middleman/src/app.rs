@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::delivery::DeliveryTable;
-use crate::error::DynResult;
+use crate::error::Result;
 use crate::event::{Event, EventTable};
 use crate::migration::Migrator;
 use crate::subscriber::SubscriberTable;
@@ -15,14 +15,13 @@ use crate::types::Db;
 pub struct Application {
     pub(crate) config: Box<Config>,
     pub(crate) db: Arc<Db>,
-    pub(crate) transaction_lock: TransactionLock,
     pub(crate) events: EventTable,
     pub(crate) deliveries: DeliveryTable,
     pub(crate) subscribers: SubscriberTable,
 }
 
 impl Application {
-    pub fn new(config: Box<Config>) -> DynResult<Self> {
+    pub fn new(config: Box<Config>) -> Result<Self> {
         let mut migrator = Migrator::new(&config.db_dir)?;
         migrator.migrate()?;
         let db = Arc::new(migrator.unwrap());
@@ -42,7 +41,7 @@ impl Application {
         })
     }
 
-    pub fn create_event(&self, event: &Event) -> DynResult<u64> {
+    pub fn create_event(&self, event: &Event) -> Result<u64> {
         let mut opts = rocksdb::OptimisticTransactionOptions::new();
         opts.set_snapshot(true);
         let mut txn = Transaction::new(self);
@@ -57,7 +56,7 @@ impl Application {
         txn: &mut Transaction,
         event_id: u64,
         event: &Event,
-    ) -> DynResult<()> {
+    ) -> Result<()> {
         let subscribers = self.subscribers.iter_by_stream(event.tag(), event.stream());
         for subscriber in subscribers {
             self.deliveries.create(txn, subscriber?.id(), event_id);

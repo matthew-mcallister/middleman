@@ -1,0 +1,18 @@
+[package]
+name = "middleman_db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "2.8.0"
+byteorder = "1.5.0"
+byteview = "0.5.3"
+dashmap = "6.1.0"
+log = "0.4.25"
+middleman_macros = { version = "0.1.0", path = "../middleman_macros" }
+owning_ref = "0.4.1"
+rocksdb = "0.23.0"
+uuid = "1.14.0"
+
+[dev-dependencies]
+tempfile = "3.14.0"

@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use crate::bytes::{AsRawBytes, OwnedFromBytesUnchecked};
 use crate::error::Result;
 use crate::prefix::IsPrefixOf;
-use crate::types::{Db, Owned, Owned2};
+use crate::{Owned, Owned2, RawDb};
 
 /// Trait for implementing iterators and wrappers around the base DB cursor.
 // XXX: I think with streaming iterators, a cursor could just be a double-ended
@@ -55,7 +55,7 @@ pub struct BaseCursor<
     K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized,
     V: OwnedFromBytesUnchecked + ToOwned + ?Sized,
 > {
-    raw: rocksdb::DBRawIteratorWithThreadMode<'db, Db>,
+    raw: rocksdb::DBRawIteratorWithThreadMode<'db, RawDb>,
     _k: PhantomData<*const K>,
     _v: PhantomData<*const V>,
 }
@@ -66,7 +66,7 @@ impl<
         V: OwnedFromBytesUnchecked + ToOwned + ?Sized,
     > BaseCursor<'db, K, V>
 {
-    pub fn new(raw: rocksdb::DBRawIteratorWithThreadMode<'db, Db>) -> Self {
+    pub(crate) fn new(raw: rocksdb::DBRawIteratorWithThreadMode<'db, RawDb>) -> Self {
         Self {
             raw,
             _k: Default::default(),

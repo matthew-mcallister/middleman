@@ -1,17 +1,17 @@
-use std::marker::PhantomData;
-
 use crate::bytes::{AsRawBytes, OwnedFromBytesUnchecked};
+use crate::column_family::ColumnFamily;
 use crate::cursor::BaseCursor;
-use crate::error::DynResult;
+use crate::db::Db;
+use crate::error::Result;
 use crate::transaction::Transaction;
-use crate::types::{Db, DbColumnFamily};
+use std::marker::PhantomData;
 
 pub struct CfAccessor<
     'db,
     K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized + 'static,
     V: OwnedFromBytesUnchecked + ToOwned + ?Sized + 'static,
 > {
-    cf: &'db DbColumnFamily,
+    cf: &'db ColumnFamily,
     _k: PhantomData<*const K>,
     _v: PhantomData<*const V>,
 }
@@ -22,7 +22,7 @@ impl<
         V: OwnedFromBytesUnchecked + AsRawBytes + ?Sized + 'static,
     > CfAccessor<'db, K, V>
 {
-    pub fn new(cf: &'db DbColumnFamily) -> Self {
+    pub fn new(cf: &'db ColumnFamily) -> Self {
         Self {
             cf,
             _k: Default::default(),
@@ -31,12 +31,12 @@ impl<
     }
 
     fn db(&self) -> &'db Db {
-        self.cf.as_owner()
+        self.cf.db()
     }
 
-    pub unsafe fn get_unchecked(&self, key: &K) -> DynResult<Option<Box<V>>> {
+    pub unsafe fn get_unchecked(&self, key: &K) -> Result<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
-        match self.db().get_cf(&**self.cf, key)? {
+        match self.db().raw.get_cf(&**self.cf, key)? {
             Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
             None => Ok(None),
         }
@@ -46,7 +46,7 @@ impl<
         &self,
         txn: &Transaction<'_>,
         key: &K,
-    ) -> DynResult<Option<Box<V>>> {
+    ) -> Result<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
         match txn.get_cf(self.cf, key)? {
             Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
@@ -54,12 +54,12 @@ impl<
         }
     }
 
-    pub fn put(&self, key: &K, value: &V) -> DynResult<()> {
+    pub fn put(&self, key: &K, value: &V) -> Result<()> {
         // This is technically UB; the rocksdb crate requires initialized bytes
         // though uninitialized bytes should be safe
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
-        Ok(self.db().put_cf(&**self.cf, key, value)?)
+        Ok(self.db().raw.put_cf(&**self.cf, key, value)?)
     }
 
     pub fn put_txn(&self, txn: &mut Transaction<'_>, key: &K, value: &V) {
@@ -68,14 +68,14 @@ impl<
         txn.put_cf(self.cf, key, value);
     }
 
-    pub fn put_txn_locked(&self, txn: &mut Transaction<'_>, key: &K, value: &V) {
+    pub fn put_txn_locked(&self, txn: &mut Transaction<'_>, key: &K, value: &V) -> Result<()> {
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
-        txn.put_cf_locked(self.cf, key, value);
+        txn.put_cf_locked(self.cf, key, value)
     }
 
     pub unsafe fn cursor_unchecked(&self) -> BaseCursor<'db, K, V> {
-        BaseCursor::<'_, K, V>::new(self.db().raw_iterator_cf(&**self.cf))
+        BaseCursor::<'_, K, V>::new(self.db().raw.raw_iterator_cf(&**self.cf))
     }
 }
 
@@ -83,23 +83,19 @@ impl<
 mod tests {
     use std::sync::Arc;
 
-    use owning_ref::OwningRef;
-
     use crate::accessor::CfAccessor;
+    use crate::column_family::ColumnFamily;
     use crate::key::{BigEndianU16, FiniteString, Packed2};
-    use crate::testing::TestHarness;
-    use crate::types::{Db, DbColumnFamily};
+    use crate::testing::TestDb;
 
-    fn cf() -> DbColumnFamily {
-        let mut harness = TestHarness::new();
-        let db_dir = harness.db_dir();
-
-        let mut options = rocksdb::Options::default();
-        options.create_if_missing(true);
-
-        let mut db = Db::open(&options, &db_dir).unwrap();
-        db.create_cf("cf", &Default::default()).unwrap();
-        OwningRef::new(Arc::new(db)).map(|db| db.cf_handle("cf").unwrap())
+    fn cf() -> ColumnFamily {
+        let mut harness = TestDb::new();
+        let db = harness.db();
+        Arc::get_mut(db)
+            .unwrap()
+            .create_column_family(&("cf", &Default::default(), Default::default()))
+            .unwrap();
+        db.get_column_family("cf").unwrap()
     }
 
     #[test]

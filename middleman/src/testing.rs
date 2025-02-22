@@ -10,7 +10,7 @@ use compact_str::CompactString;
 
 use crate::config::Config;
 use crate::connection::{Connection, ConnectionFactory, Http11ConnectionPool};
-use crate::error::DynResult;
+use crate::error::Result;
 use crate::Application;
 
 #[derive(Default)]
@@ -109,7 +109,7 @@ impl ConnectionFactory for TestConnectionFactory {
         &self,
         host_string: &str,
         keep_alive_secs: u16,
-    ) -> Pin<Box<dyn Future<Output = DynResult<Self::Connection>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send>> {
         let num_connections = Arc::clone(&self.num_connections);
         num_connections.fetch_add(1, Ordering::Relaxed);
         let id = self.id.fetch_add(1, Ordering::Relaxed);

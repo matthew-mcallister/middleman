@@ -37,11 +37,11 @@ pub fn db_key(_args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
 
-        unsafe impl AsBytes for #struct_name {}
+        unsafe impl middleman_db::bytes::AsBytes for #struct_name {}
 
         impl AsRef<[u8]> for #struct_name {
             fn as_ref(&self) -> &[u8] {
-                <Self as crate::bytes::AsBytes>::as_bytes(self)
+                <Self as middleman_db::bytes::AsBytes>::as_bytes(self)
             }
         }
     };
@@ -60,8 +60,8 @@ pub fn to_owned(input: TokenStream) -> TokenStream {
             type Owned = Box<Self>;
 
             fn to_owned(&self) -> Box<Self> {
-                let bytes: Box<[u8]> = <Self as AsBytes>::as_bytes(self).into();
-                unsafe { <#name as crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(bytes) }
+                let bytes: Box<[u8]> = <Self as middleman_db::bytes::AsBytes>::as_bytes(self).into();
+                unsafe { <#name as middleman_db::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(bytes) }
             }
         }
     };
@@ -76,10 +76,10 @@ pub fn owned_from_bytes_unchecked(input: TokenStream) -> TokenStream {
 
     // TODO maybe: Handle generics
     let expanded = quote! {
-        impl crate::bytes::OwnedFromBytesUnchecked for #name {
+        impl middleman_db::bytes::OwnedFromBytesUnchecked for #name {
             unsafe fn owned_from_bytes_unchecked(bytes: &[u8]) -> Box<Self> {
                 let bytes: Box<[u8]> = bytes.into();
-                unsafe { <#name as crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(bytes) }
+                unsafe { <#name as middleman_db::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(bytes) }
             }
         }
     };

@@ -13,7 +13,7 @@ use rand::random;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use crate::error::DynResult;
+use crate::error::Result;
 
 pub trait Connection: Send + Sync + 'static {}
 
@@ -24,7 +24,7 @@ pub trait ConnectionFactory {
         &self,
         host_string: &str,
         keep_alive_secs: u16,
-    ) -> Pin<Box<dyn Future<Output = DynResult<Self::Connection>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send>>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -323,7 +323,7 @@ impl<C: Connection> Http11ConnectionPool<C> {
     fn acquire_lease<'a>(
         &'a self,
         host_string: &'a str,
-    ) -> impl Future<Output = DynResult<(NonZeroU64, SlotHandle)>> + Send + 'a {
+    ) -> impl Future<Output = Result<(NonZeroU64, SlotHandle)>> + Send + 'a {
         async move {
             loop {
                 let mut host_pool = self.hosts.entry(host_string.into()).or_insert(PerHostPool {
@@ -378,7 +378,7 @@ impl<C: Connection> Http11ConnectionPool<C> {
     pub fn connect<'a: 'b, 'b>(
         &'a self,
         host_string: &'b str,
-    ) -> impl Future<Output = DynResult<ConnectionHandle<'a, C>>> + Send + 'b {
+    ) -> impl Future<Output = Result<ConnectionHandle<'a, C>>> + Send + 'b {
         async move {
             let (lease_id, handle) = self.acquire_lease(host_string).await?;
             let leased_slot = LeasedSlot { pool: self, handle };

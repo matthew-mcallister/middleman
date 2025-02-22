@@ -8,11 +8,11 @@ use uuid::Uuid;
 use crate::accessor::CfAccessor;
 use crate::bytes::AsBytes;
 use crate::cursor::Cursor;
-use crate::error::DynResult;
+use crate::error::Result;
 use crate::key::{packed, Packed2};
 use crate::model::big_tuple_struct;
 use crate::transaction::Transaction;
-use crate::types::{ColumnFamilyName, Db, DbColumnFamily};
+use crate::types::{ColumnFamilyName, Db, ColumnFamily};
 use crate::util::get_cf;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -34,7 +34,7 @@ big_tuple_struct! {
 }
 
 pub(crate) struct SubscriberTable {
-    cf: DbColumnFamily,
+    cf: ColumnFamily,
 }
 
 pub(crate) type SubscriberKey = Packed2<Uuid, Uuid>;
@@ -50,7 +50,7 @@ impl Subscriber {
 }
 
 impl SubscriberTable {
-    pub(crate) fn new(db: Arc<Db>) -> DynResult<Self> {
+    pub(crate) fn new(db: Arc<Db>) -> Result<Self> {
         let cf = get_cf(db, ColumnFamilyName::Subscribers);
         Ok(Self { cf })
     }
@@ -59,13 +59,13 @@ impl SubscriberTable {
         CfAccessor::new(&self.cf)
     }
 
-    pub fn create(&self, txn: &mut Transaction<'_>, subscriber: &Subscriber) -> DynResult<()> {
+    pub fn create(&self, txn: &mut Transaction<'_>, subscriber: &Subscriber) -> Result<()> {
         let key = packed!(subscriber.tag(), subscriber.id());
         self.accessor().put_txn(txn, &key, subscriber);
         Ok(())
     }
 
-    pub fn get(&self, tag: Uuid, id: Uuid) -> DynResult<Option<Box<Subscriber>>> {
+    pub fn get(&self, tag: Uuid, id: Uuid) -> Result<Option<Box<Subscriber>>> {
         let key = packed!(tag, id);
         unsafe { self.accessor().get_unchecked(&key) }
     }
@@ -74,7 +74,7 @@ impl SubscriberTable {
     pub fn iter_by_tag<'a>(
         &'a self,
         tag: Uuid,
-    ) -> impl Iterator<Item = DynResult<Box<Subscriber>>> + 'a {
+    ) -> impl Iterator<Item = Result<Box<Subscriber>>> + 'a {
         unsafe {
             self.accessor().cursor_unchecked().prefix_iter::<[u8; 16]>(*tag.as_bytes()).values()
         }
@@ -86,7 +86,7 @@ impl SubscriberTable {
         &'a self,
         tag: Uuid,
         stream: &'a str,
-    ) -> impl Iterator<Item = DynResult<Box<Subscriber>>> + 'a {
+    ) -> impl Iterator<Item = Result<Box<Subscriber>>> + 'a {
         self.iter_by_tag(tag).filter_map(|item| {
             let Ok(subscriber) = item else { return Some(item) };
             let regex = Regex::new(subscriber.stream_regex()).unwrap();
@@ -132,7 +132,7 @@ impl SubscriberBuilder {
         self
     }
 
-    pub fn build(&mut self) -> DynResult<Box<Subscriber>> {
+    pub fn build(&mut self) -> Result<Box<Subscriber>> {
         let destination_url = self.destination_url.take().ok_or("Missing subscriber URL")?;
         if destination_url.scheme() != "http" && destination_url.scheme() != "https" {
             return Err("Invalid subscriber URL".into());

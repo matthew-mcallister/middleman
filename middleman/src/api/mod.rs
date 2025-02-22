@@ -7,7 +7,7 @@ use hyper::StatusCode;
 use serde_derive::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::event::{Event, EventBuilder};
 use crate::types::ContentType;
 use crate::Application;

@@ -5,16 +5,17 @@ use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::accessor::CfAccessor;
-use crate::big_tuple::{big_tuple, BigTuple};
-use crate::bytes::AsBytes;
-use crate::cursor::Cursor;
-use crate::error::DynResult;
-use crate::key::{packed, BigEndianU64, Packed2, Packed3};
-use crate::model::big_tuple_struct;
-use crate::transaction::Transaction;
-use crate::types::{ColumnFamilyName, ContentType, Db, DbColumnFamily};
-use crate::util::get_cf;
+use crate::error::Result;
+use crate::types::{ColumnFamilyName, ContentType};
+use db::accessor::CfAccessor;
+use db::big_tuple::{big_tuple, BigTuple};
+use db::bytes::AsBytes;
+use db::cursor::Cursor;
+use db::key::{packed, BigEndianU64, Packed2, Packed3};
+use db::model::big_tuple_struct;
+use db::transaction::Transaction;
+use db::types::{ColumnFamily, Db};
+use db::util::get_cf;
 
 // TODO: ID should probably be stored on the event
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,9 +122,9 @@ impl<'a> EventBuilder<'a> {
 pub(crate) struct EventTable {
     // XXX: Need a persistent autoincrement implementation
     event_sequence_number: AtomicU64,
-    cf: DbColumnFamily,
-    tag_idempotency_index_cf: DbColumnFamily,
-    tag_stream_index_cf: DbColumnFamily,
+    cf: ColumnFamily,
+    tag_idempotency_index_cf: ColumnFamily,
+    tag_stream_index_cf: ColumnFamily,
 }
 
 big_tuple_struct! {
@@ -135,7 +136,7 @@ big_tuple_struct! {
 }
 
 impl EventTable {
-    pub fn new(db: Arc<Db>) -> DynResult<Self> {
+    pub fn new(db: Arc<Db>) -> Result<Self> {
         let cf = get_cf(Arc::clone(&db), ColumnFamilyName::Events);
         let tag_idempotency_index_cf = get_cf(
             Arc::clone(&db),
@@ -167,7 +168,7 @@ impl EventTable {
     /// guaranteed to be ordered.
     // XXX: Is it possible to catch write conflicts and report those as a
     // unique status so the operation need not be retried?
-    pub fn create(&self, txn: &mut Transaction<'_>, event: &Event) -> DynResult<u64> {
+    pub fn create(&self, txn: &mut Transaction<'_>, event: &Event) -> Result<u64> {
         let (tag, idempotency_key) = (event.tag(), event.idempotency_key());
 
         // Acquire lock
@@ -195,7 +196,7 @@ impl EventTable {
         Ok(id)
     }
 
-    pub fn get(&self, tag: Uuid, id: u64) -> DynResult<Option<Box<Event>>> {
+    pub fn get(&self, tag: Uuid, id: u64) -> Result<Option<Box<Event>>> {
         // XXX: Is pinning the slice here a performance win? In which cases?
         let key = packed!(tag, id.into());
         unsafe { self.accessor().get_unchecked(&key) }
@@ -206,7 +207,7 @@ impl EventTable {
         txn: &mut Transaction<'_>,
         tag: Uuid,
         idempotency_key: Uuid,
-    ) -> DynResult<Option<u64>> {
+    ) -> Result<Option<u64>> {
         let key: Packed2<Uuid, Uuid> = (tag, idempotency_key).into();
         unsafe {
             self.tag_idempotency_index_accessor()
@@ -220,7 +221,7 @@ impl EventTable {
         txn: &mut Transaction<'_>,
         tag: Uuid,
         idempotency_key: Uuid,
-    ) -> DynResult<Option<(u64, Box<Event>)>> {
+    ) -> Result<Option<(u64, Box<Event>)>> {
         let id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
         let Some(id) = id else { return Ok(None) };
         let Some(event) = self.get(tag, id)? else { return Ok(None) };
@@ -231,7 +232,7 @@ impl EventTable {
         &'a self,
         tag: Uuid,
         starting_id: u64,
-    ) -> impl Iterator<Item = DynResult<(u64, Box<Event>)>> + 'a {
+    ) -> impl Iterator<Item = Result<(u64, Box<Event>)>> + 'a {
         let mut cursor = unsafe { self.accessor().cursor_unchecked() };
         cursor.seek(&packed!(tag, starting_id.into()));
         cursor.prefix::<[u8; 16]>(*tag.as_bytes()).into_iter().map(move |item| {
@@ -246,7 +247,7 @@ impl EventTable {
         tag: Uuid,
         stream: &str,
         starting_id: u64,
-    ) -> impl Iterator<Item = DynResult<(u64, Box<Event>)>> + 'a {
+    ) -> impl Iterator<Item = Result<(u64, Box<Event>)>> + 'a {
         let prefix = big_tuple!(&tag, stream);
         let mut cursor = unsafe { self.tag_stream_index_accessor().cursor_unchecked() };
         let seek_to = EventStreamIndexKey::new(&tag, stream, &starting_id.into());
@@ -265,7 +266,7 @@ impl EventTable {
 mod tests {
     use crate::error::ErrorKind;
     use crate::testing::TestHarness;
-    use crate::transaction::Transaction;
+    use db::transaction::Transaction;
 
     use super::{ContentType, Event, EventBuilder};
 

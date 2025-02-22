@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! big_tuple_struct {
     (
         $(#[$($meta:tt)*])*
@@ -78,4 +79,4 @@ macro_rules! big_tuple_struct {
     };
 }
 
-pub(crate) use big_tuple_struct;
+pub use big_tuple_struct;

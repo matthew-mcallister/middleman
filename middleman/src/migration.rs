@@ -6,25 +6,9 @@ use std::str::FromStr;
 
 use log::info;
 
-use crate::big_tuple::big_tuple_comparator;
+use crate::db::Db;
 use crate::error::{Error, Result};
-use crate::types::{ColumnFamilyName, Db};
-
-impl ColumnFamilyName {
-    /// Returns the descriptor needed to create/open this CF.
-    fn descriptor(self) -> (&'static str, rocksdb::Options, rocksdb::ColumnFamilyTtl) {
-        let (options, ttl) = match self {
-            Self::EventTagStreamIndex => {
-                let mut options = rocksdb::Options::default();
-                options.set_comparator("big_tuple", Box::new(big_tuple_comparator));
-                (options, Default::default())
-            },
-            _ => Default::default(),
-        };
-        let name: &'static str = self.into();
-        (name, options, ttl)
-    }
-}
+use crate::types::RawDb;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Version {
@@ -136,7 +120,7 @@ fn create_or_open(db_dir: &Path) -> Result<(Version, Db)> {
     options.create_if_missing(true);
 
     // FIXME: Have to replace OptimisticTransactionDB with DBWithTTL :'(
-    let db = Db::open_cf_descriptors(&options, &db_dir, descriptors)?;
+    let db = RawDb::open_cf_descriptors(&options, &db_dir, descriptors)?;
 
     Ok((version, db))
 }

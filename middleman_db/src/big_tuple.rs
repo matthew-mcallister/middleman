@@ -25,7 +25,6 @@ bitflags! {
 /// `BigTuples` come with multiple layout options. Fields may be packed or
 /// aligned. If fields are short enough, then 16-bit field offsets will be used
 /// instead of 32-bit offsets.
-#[derive(ToOwned, OwnedFromBytesUnchecked)]
 #[repr(align(8))]
 pub struct BigTuple {
     tail: [u8],
@@ -35,7 +34,6 @@ pub struct BigTuple {
 /// give us aligned memory to work with. Ideally we would be using a storage
 /// engine that *does* guarantee aligned memory, but in absentia, we can cut
 /// down on extra copies by working with unaligned memory directly.
-#[derive(ToOwned, OwnedFromBytesUnchecked)]
 #[repr(transparent)]
 pub struct BigTupleUnaligned {
     tail: [u8],
@@ -190,6 +188,26 @@ macro_rules! common_impl {
                 }
                 self.iter().take(self.len() - 1).zip(other.iter()).all(|(a, b)| a == b)
                     && self.get(self.len() - 1).is_prefix_of(other.get(self.len() - 1))
+            }
+        }
+
+        impl ToOwned for $Name {
+            type Owned = Box<Self>;
+
+            fn to_owned(&self) -> Box<Self> {
+                let bytes: Box<[u8]> = <Self as crate::bytes::AsBytes>::as_bytes(self).into();
+                unsafe {
+                    <Self as crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(bytes)
+                }
+            }
+        }
+
+        impl crate::bytes::OwnedFromBytesUnchecked for $Name {
+            unsafe fn owned_from_bytes_unchecked(bytes: &[u8]) -> Box<Self> {
+                let bytes: Box<[u8]> = bytes.into();
+                unsafe {
+                    <Self as crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(bytes)
+                }
             }
         }
     };
@@ -368,7 +386,8 @@ impl AsRef<BigTupleUnaligned> for BigTuple {
     }
 }
 
-pub(crate) fn big_tuple_comparator(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+/// Compares two byte strings by (unsafely) reinterpreting them as BigTuples.
+pub unsafe fn big_tuple_comparator(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     unsafe {
         let a = BigTupleUnaligned::ref_from_bytes_unchecked(a);
         let b = BigTupleUnaligned::ref_from_bytes_unchecked(b);
@@ -376,6 +395,7 @@ pub(crate) fn big_tuple_comparator(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     }
 }
 
+#[macro_export]
 macro_rules! big_tuple {
     ($($expr:expr),*$(,)?) => {{
         let info = $crate::big_tuple::BigTupleCreateInfo {
@@ -386,7 +406,7 @@ macro_rules! big_tuple {
     }};
 }
 
-pub(crate) use big_tuple;
+pub use big_tuple;
 
 #[cfg(test)]
 mod tests {
