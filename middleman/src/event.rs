@@ -1,21 +1,19 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use db::big_tuple::{big_tuple, BigTuple};
+use db::bytes::AsBytes;
+use db::key::{packed, BigEndianU64, Packed2, Packed3};
+use db::model::big_tuple_struct;
+use db::{Accessor, ColumnFamily, Cursor, Db, Transaction};
+use middleman_db::{self as db, ColumnFamilyDescriptor};
 use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::db::ColumnFamilyName;
 use crate::error::Result;
-use crate::types::{ColumnFamilyName, ContentType};
-use db::accessor::CfAccessor;
-use db::big_tuple::{big_tuple, BigTuple};
-use db::bytes::AsBytes;
-use db::cursor::Cursor;
-use db::key::{packed, BigEndianU64, Packed2, Packed3};
-use db::model::big_tuple_struct;
-use db::transaction::Transaction;
-use db::types::{ColumnFamily, Db};
-use db::util::get_cf;
+use crate::types::ContentType;
 
 // TODO: ID should probably be stored on the event
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +51,7 @@ impl Event {
 }
 
 impl Serialize for Event {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -137,12 +135,11 @@ big_tuple_struct! {
 
 impl EventTable {
     pub fn new(db: Arc<Db>) -> Result<Self> {
-        let cf = get_cf(Arc::clone(&db), ColumnFamilyName::Events);
-        let tag_idempotency_index_cf = get_cf(
-            Arc::clone(&db),
-            ColumnFamilyName::EventTagIdempotencyKeyIndex,
-        );
-        let tag_stream_index_cf = get_cf(db, ColumnFamilyName::EventTagStreamIndex);
+        let cf = db.get_column_family(ColumnFamilyName::Events.name()).unwrap();
+        let tag_idempotency_index_cf =
+            db.get_column_family(ColumnFamilyName::EventTagIdempotencyKeyIndex.name()).unwrap();
+        let tag_stream_index_cf =
+            db.get_column_family(ColumnFamilyName::EventTagStreamIndex.name()).unwrap();
         Ok(Self {
             event_sequence_number: AtomicU64::new(0),
             cf,
@@ -151,16 +148,16 @@ impl EventTable {
         })
     }
 
-    fn accessor<'a>(&'a self) -> CfAccessor<'a, Packed2<Uuid, BigEndianU64>, Event> {
-        CfAccessor::new(&self.cf)
+    fn accessor<'a>(&'a self) -> Accessor<'a, Packed2<Uuid, BigEndianU64>, Event> {
+        Accessor::new(&self.cf)
     }
 
-    fn tag_idempotency_index_accessor<'a>(&'a self) -> CfAccessor<'a, Packed2<Uuid, Uuid>, u64> {
-        CfAccessor::new(&self.tag_idempotency_index_cf)
+    fn tag_idempotency_index_accessor<'a>(&'a self) -> Accessor<'a, Packed2<Uuid, Uuid>, u64> {
+        Accessor::new(&self.tag_idempotency_index_cf)
     }
 
-    fn tag_stream_index_accessor<'a>(&'a self) -> CfAccessor<'a, EventStreamIndexKey, ()> {
-        CfAccessor::new(&self.tag_stream_index_cf)
+    fn tag_stream_index_accessor<'a>(&'a self) -> Accessor<'a, EventStreamIndexKey, ()> {
+        Accessor::new(&self.tag_stream_index_cf)
     }
 
     /// Creates an event. Event creation is atomic but *not* synchronized,
@@ -199,7 +196,7 @@ impl EventTable {
     pub fn get(&self, tag: Uuid, id: u64) -> Result<Option<Box<Event>>> {
         // XXX: Is pinning the slice here a performance win? In which cases?
         let key = packed!(tag, id.into());
-        unsafe { self.accessor().get_unchecked(&key) }
+        unsafe { Ok(self.accessor().get_unchecked(&key)?) }
     }
 
     pub fn get_id_by_idempotency_key(
@@ -213,6 +210,7 @@ impl EventTable {
             self.tag_idempotency_index_accessor()
                 .get_txn_unchecked(txn, &key)
                 .map(|x| x.map(|x| *x))
+                .map_err(Into::into)
         }
     }
 
@@ -264,11 +262,12 @@ impl EventTable {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::ErrorKind;
-    use crate::testing::TestHarness;
     use db::transaction::Transaction;
+    use middleman_db as db;
 
     use super::{ContentType, Event, EventBuilder};
+    use crate::error::ErrorKind;
+    use crate::testing::TestHarness;
 
     #[test]
     fn test_builder() {
@@ -307,7 +306,7 @@ mod tests {
         let events = &app.events;
 
         let event = testing_event();
-        let mut txn = Transaction::new(app);
+        let mut txn = Transaction::new(&app.db);
         let id = events.create(&mut txn, &event).unwrap();
         txn.commit().unwrap();
 
@@ -324,17 +323,17 @@ mod tests {
         let events = &app.events;
 
         let event = testing_event();
-        let mut txn = Transaction::new(app);
+        let mut txn = Transaction::new(&app.db);
         let id = events.create(&mut txn, &event).unwrap();
         txn.commit().unwrap();
 
-        let mut txn = Transaction::new(app);
+        let mut txn = Transaction::new(&app.db);
         let id2 = events.create(&mut txn, &event).unwrap();
         txn.commit().unwrap();
         assert_eq!(id, id2);
 
         // Also test lookup by idempotency key
-        let mut txn = Transaction::new(app);
+        let mut txn = Transaction::new(&app.db);
         let (id2, event2) = events
             .get_by_idempotency_key(&mut txn, event.tag(), event.idempotency_key())
             .unwrap()
@@ -350,7 +349,7 @@ mod tests {
         let app = harness.application();
         let events = &app.events;
 
-        let mut txn = Transaction::new(app);
+        let mut txn = Transaction::new(&app.db);
         let mut base = EventBuilder::new();
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         base.content_type(ContentType::Json).tag(tag);
@@ -397,10 +396,10 @@ mod tests {
         let events = &app.events;
 
         let event = testing_event();
-        let mut txn1 = Transaction::new(app);
+        let mut txn1 = Transaction::new(&app.db);
         events.create(&mut txn1, &event).unwrap();
 
-        let mut txn2 = Transaction::new(app);
+        let mut txn2 = Transaction::new(&app.db);
         assert_eq!(
             events.create(&mut txn2, &event).unwrap_err().kind(),
             ErrorKind::Busy

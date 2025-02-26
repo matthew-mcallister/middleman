@@ -1,7 +1,6 @@
 use std::mem::MaybeUninit;
 
 use bitflags::bitflags;
-use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 
 use crate::bytes::{AsBytes, AsRawBytes, FromBytesUnchecked};
 use crate::prefix::IsPrefixOf;
@@ -39,20 +38,11 @@ pub struct BigTupleUnaligned {
     tail: [u8],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct BigTupleCreateInfo<'a> {
     pub aligned: bool,
     pub fields: &'a [&'a [u8]],
-}
-
-impl<'a> Default for BigTupleCreateInfo<'a> {
-    fn default() -> Self {
-        Self {
-            aligned: false,
-            fields: &[],
-        }
-    }
 }
 
 macro_rules! common_impl {
@@ -398,10 +388,9 @@ pub unsafe fn big_tuple_comparator(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 #[macro_export]
 macro_rules! big_tuple {
     ($($expr:expr),*$(,)?) => {{
-        let info = $crate::big_tuple::BigTupleCreateInfo {
-            fields: &[$($crate::bytes::AsBytes::as_bytes($expr),)*],
-            ..Default::default()
-        };
+        let fields = &[$($crate::bytes::AsBytes::as_bytes($expr),)*];
+        let mut info = $crate::big_tuple::BigTupleCreateInfo::default();
+        info.fields = fields;
         $crate::big_tuple::BigTuple::new(info)
     }};
 }

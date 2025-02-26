@@ -15,11 +15,10 @@ macro_rules! big_tuple_struct {
             fn new(
                 $($field: &$Field,)*
             ) -> Box<Self> {
-                let info = $crate::big_tuple::BigTupleCreateInfo {
-                    aligned: true,
-                    fields: &[$($crate::bytes::AsBytes::as_bytes($field),)*],
-                    ..Default::default()
-                };
+                let fields = &[$($crate::bytes::AsBytes::as_bytes($field),)*];
+                let mut info = $crate::big_tuple::BigTupleCreateInfo::default();
+                info.aligned = true;
+                info.fields = fields;
                 let tuple = $crate::big_tuple::BigTuple::new(info);
                 unsafe { std::mem::transmute(tuple) }
             }

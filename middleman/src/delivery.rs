@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use chrono::{Datelike, Timelike, Utc};
+use db::bytes::AsBytes;
+use db::key::Packed2;
+use db::{Accessor, ColumnFamily, ColumnFamilyDescriptor, Db, Transaction};
+use middleman_db::{self as db};
 use uuid::Uuid;
 
-use crate::accessor::CfAccessor;
-use crate::bytes::AsBytes;
+use crate::db::ColumnFamilyName;
 use crate::error::Result;
-use crate::key::Packed2;
-use crate::transaction::Transaction;
-use crate::types::{ColumnFamily, ColumnFamilyName, Db};
-use crate::util::get_cf;
 
 // UTC datetime with stable binary representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,12 +74,12 @@ type DeliveryKey = Packed2<Uuid, u64>;
 
 impl DeliveryTable {
     pub(crate) fn new(db: Arc<Db>) -> Result<Self> {
-        let cf = get_cf(db, ColumnFamilyName::Deliveries);
+        let cf = db.get_column_family(ColumnFamilyName::Deliveries.name()).unwrap();
         Ok(Self { cf })
     }
 
-    fn accessor<'a>(&'a self) -> CfAccessor<'a, DeliveryKey, Delivery> {
-        CfAccessor::new(&self.cf)
+    fn accessor<'a>(&'a self) -> Accessor<'a, DeliveryKey, Delivery> {
+        Accessor::new(&self.cf)
     }
 
     pub(crate) fn create(
@@ -104,7 +103,9 @@ impl DeliveryTable {
         unsafe { Ok(self.accessor().get_unchecked(&(subscriber_id, event_id).into())?.map(|x| *x)) }
     }
 
-    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = Result<(DeliveryKey, Delivery)>> + 'a {
+    pub(crate) fn iter<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = db::Result<(DeliveryKey, Delivery)>> + 'a {
         unsafe { self.accessor().cursor_unchecked().into_iter() }
     }
 }
@@ -129,8 +130,9 @@ impl Delivery {
 
 #[cfg(test)]
 mod tests {
+    use middleman_db::Transaction;
+
     use crate::testing::TestHarness;
-    use crate::transaction::Transaction;
 
     #[test]
     fn test_create_delivery() {
@@ -140,7 +142,7 @@ mod tests {
 
         let subscriber_id = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let event_id: u64 = 1;
-        let mut txn = Transaction::new(app);
+        let mut txn = Transaction::new(&app.db);
         let delivery = deliveries.create(&mut txn, subscriber_id, event_id);
         txn.commit().unwrap();
 

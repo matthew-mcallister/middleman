@@ -1,5 +1,4 @@
 use serde_derive::{Deserialize, Serialize};
-use strum_macros::{IntoStaticStr, VariantNames};
 
 // XXX: Support other content types
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]

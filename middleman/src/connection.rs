@@ -28,7 +28,7 @@ pub trait ConnectionFactory {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ConnectionPoolError {
+pub(crate) enum ConnectionPoolError {
     /// Occurs when the lease on a connection expires.
     LeaseExpired,
 }

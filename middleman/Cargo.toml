@@ -17,7 +17,7 @@ env_logger = "0.11.6"
 hyper = { version = "1.5.2", features = ["http1", "http2", "client"] }
 log = "0.4.25"
 middleman_macros = { version = "0.1.0", path = "../middleman_macros" }
-db = { package = "middleman_db", version = "0.1.0", path = "../middleman_db" }
+middleman_db = { version = "0.1.0", path = "../middleman_db" }
 owning_ref = "0.4.1"
 parking_lot = "0.12.3"
 paste = "1.0.15"

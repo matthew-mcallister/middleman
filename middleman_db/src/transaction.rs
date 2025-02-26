@@ -89,12 +89,12 @@ impl<'db> Transaction<'db> {
         self.locks.db
     }
 
-    pub(crate) fn lock_key(&mut self, key: ByteView) -> Result<()> {
+    pub fn lock_key(&mut self, key: ByteView) -> Result<()> {
         if self.db().transaction_lock.acquire(key.clone()) {
             self.locks.keys.push(key);
             Ok(())
         } else {
-            Err(Error::TransactionConflict)
+            Err(Error::transaction_conflict())?
         }
     }
 

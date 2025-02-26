@@ -1,3 +1,7 @@
+use middleman_db as db;
+use middleman_db::big_tuple::big_tuple_comparator;
+use strum_macros::{IntoStaticStr, VariantNames};
+
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq, VariantNames)]
 pub(crate) enum ColumnFamilyName {
     Deliveries,
@@ -7,18 +11,28 @@ pub(crate) enum ColumnFamilyName {
     Subscribers,
 }
 
-impl db::ColumnFamilyId for ColumnFamilyName {
-    /// Returns the descriptor needed to create/open this CF.
-    fn descriptor(self) -> (&'static str, rocksdb::Options, rocksdb::ColumnFamilyTtl) {
-        let (options, ttl) = match self {
+impl db::column_family::ColumnFamilyDescriptor for ColumnFamilyName {
+    fn name(&self) -> &str {
+        self.into()
+    }
+
+    fn options(&self) -> rocksdb::Options {
+        match self {
             Self::EventTagStreamIndex => {
                 let mut options = rocksdb::Options::default();
-                options.set_comparator("big_tuple", Box::new(big_tuple_comparator));
-                (options, Default::default())
+                options.set_comparator(
+                    "big_tuple",
+                    Box::new(|a, b| unsafe { big_tuple_comparator(a, b) }),
+                );
+                options
             },
             _ => Default::default(),
-        };
-        let name: &'static str = self.into();
-        (name, options, ttl)
+        }
+    }
+
+    fn ttl(&self) -> rocksdb::ColumnFamilyTtl {
+        match self {
+            _ => Default::default(),
+        }
     }
 }

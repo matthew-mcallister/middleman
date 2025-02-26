@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::transaction::Transaction;
 use std::marker::PhantomData;
 
-pub struct CfAccessor<
+pub struct Accessor<
     'db,
     K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized + 'static,
     V: OwnedFromBytesUnchecked + ToOwned + ?Sized + 'static,
@@ -20,7 +20,7 @@ impl<
         'db,
         K: OwnedFromBytesUnchecked + AsRawBytes + ?Sized + 'static,
         V: OwnedFromBytesUnchecked + AsRawBytes + ?Sized + 'static,
-    > CfAccessor<'db, K, V>
+    > Accessor<'db, K, V>
 {
     pub fn new(cf: &'db ColumnFamily) -> Self {
         Self {
@@ -83,7 +83,7 @@ impl<
 mod tests {
     use std::sync::Arc;
 
-    use crate::accessor::CfAccessor;
+    use crate::accessor::Accessor;
     use crate::column_family::ColumnFamily;
     use crate::key::{BigEndianU16, FiniteString, Packed2};
     use crate::testing::TestDb;
@@ -104,7 +104,7 @@ mod tests {
         type Value = (u32, i16, [u8; 2]);
 
         let cf = cf();
-        let accessor = CfAccessor::<Key, Value>::new(&cf);
+        let accessor = Accessor::<Key, Value>::new(&cf);
 
         let key1: Key = (1.into(), FiniteString::try_from("blah").unwrap()).into();
         let value1: Value = (1, 2, [3, 4]);
@@ -131,7 +131,7 @@ mod tests {
         type Value = u32;
 
         let cf = cf();
-        let accessor = CfAccessor::<Key, Value>::new(&cf);
+        let accessor = Accessor::<Key, Value>::new(&cf);
 
         let key1: Key = (1.into(), FiniteString::try_from("blah").unwrap()).into();
         let value1: Value = 1;

@@ -1,22 +1,18 @@
 use std::error::Error as StdError;
-use std::result::Result as StdResult;
 
 use axum::response::IntoResponse;
 use axum::Json;
 use hyper::StatusCode;
+use middleman_db as db;
 use serde_derive::{Deserialize, Serialize};
 
+use crate::connection::ConnectionPoolError;
+
 /// General-purpose error type
-// XXX: I'm sure you can avoid allocation when there's no underlying error.
 #[derive(Debug)]
 pub struct Error {
-    inner: Box<ErrorInner>,
-}
-
-#[derive(Debug)]
-struct ErrorInner {
-    pub(crate) kind: ErrorKind,
-    pub(crate) cause: Option<Box<dyn StdError + Send + Sync + 'static>>,
+    kind: ErrorKind,
+    cause: Option<Box<dyn StdError + Send + Sync + 'static>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,7 +21,7 @@ pub(crate) enum ErrorKind {
     Unexpected,
 }
 
-pub type Result<T> = StdResult<T, Error>;
+pub type Result<T> = std::result::Result<T, Box<Error>>;
 
 impl ErrorKind {
     fn status_code(&self) -> StatusCode {
@@ -49,28 +45,49 @@ impl std::fmt::Display for ErrorKind {
 
 impl Error {
     pub(crate) fn kind(&self) -> ErrorKind {
-        self.inner.kind
+        self.kind
     }
 
     pub(crate) fn cause(&self) -> Option<&(dyn StdError + Send + Sync + 'static)> {
-        self.inner.cause.as_ref().map(|x| &**x)
+        self.cause.as_ref().map(|x| &**x)
     }
 }
 
-impl<E: Into<Box<dyn StdError + Send + Sync + 'static>>> From<E> for Error {
-    fn from(value: E) -> Self {
-        Self {
-            inner: Box::new(ErrorInner {
-                kind: ErrorKind::Unexpected,
-                cause: Some(value.into()),
-            }),
-        }
+macro_rules! unexpected_errors {
+    ($($ty:ty),*$(,)?) => {
+        $(
+            impl From<$ty> for Box<Error> {
+                fn from(value: $ty) -> Self {
+                    Box::new(Error {
+                        kind: ErrorKind::Unexpected,
+                        cause: Some(value.into()),
+                    })
+                }
+            }
+        )*
+    };
+}
+
+unexpected_errors!(
+    String,
+    std::io::Error,
+    std::net::AddrParseError,
+    std::num::ParseIntError,
+    std::env::VarError,
+);
+
+impl<'a> From<&'a str> for Box<Error> {
+    fn from(value: &'a str) -> Self {
+        Box::new(Error {
+            kind: ErrorKind::Unexpected,
+            cause: Some(value.into()),
+        })
     }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.inner.kind)?;
+        write!(f, "{}", self.kind)?;
         if let Some(ref cause) = self.cause() {
             write!(f, ": {}", cause)?;
         }
@@ -78,18 +95,38 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl From<ErrorKind> for Error {
+impl From<ErrorKind> for Box<Error> {
     fn from(value: ErrorKind) -> Self {
-        Self {
-            inner: Box::new(ErrorInner {
-                kind: value,
-                cause: None,
-            }),
-        }
+        Box::new(Error {
+            kind: value,
+            cause: None,
+        })
     }
 }
 
-impl IntoResponse for Error {
+impl From<Box<db::Error>> for Box<Error> {
+    fn from(value: Box<db::Error>) -> Self {
+        let kind = match value.kind() {
+            db::ErrorKind::TransactionConflict => ErrorKind::Busy,
+            _ => ErrorKind::Unexpected,
+        };
+        Box::new(Error {
+            kind,
+            cause: Some(value.into()),
+        })
+    }
+}
+
+impl From<ConnectionPoolError> for Box<Error> {
+    fn from(value: ConnectionPoolError) -> Self {
+        Box::new(Error {
+            kind: ErrorKind::Busy,
+            cause: Some(Box::new(value)),
+        })
+    }
+}
+
+impl IntoResponse for Box<Error> {
     fn into_response(self) -> axum::response::Response {
         #[derive(Clone, Debug, Serialize, Deserialize)]
         struct JsonError {
@@ -100,7 +137,7 @@ impl IntoResponse for Error {
             message: self.to_string(),
         })
         .into_response();
-        *response.status_mut() = self.inner.kind.status_code();
+        *response.status_mut() = self.kind.status_code();
 
         response
     }

@@ -4,11 +4,12 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use db::{Db, DbOptions};
 use log::info;
+use middleman_db as db;
 
-use crate::db::Db;
+use crate::db::ColumnFamilyName;
 use crate::error::{Error, Result};
-use crate::types::RawDb;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Version {
@@ -18,7 +19,7 @@ enum Version {
 }
 
 impl TryFrom<u32> for Version {
-    type Error = Error;
+    type Error = Box<Error>;
 
     fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
         Ok(match value {
@@ -30,7 +31,7 @@ impl TryFrom<u32> for Version {
 }
 
 impl FromStr for Version {
-    type Err = Error;
+    type Err = Box<Error>;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let int = u32::from_str(s)?;
@@ -109,18 +110,12 @@ fn read_version(db_dir: &Path) -> Result<Version> {
 fn create_or_open(db_dir: &Path) -> Result<(Version, Db)> {
     let version = read_version(db_dir)?;
 
-    let descriptors = Version::iter_inclusive(Version::V0..=version)
-        .flat_map(|v| v.column_families())
-        .map(|cf| cf.descriptor())
-        .map(|(name, options, ttl)| {
-            rocksdb::ColumnFamilyDescriptor::new_with_ttl(name, options, ttl)
-        });
+    let descriptors =
+        Version::iter_inclusive(Version::V0..=version).flat_map(|v| v.column_families()).cloned();
 
-    let mut options = rocksdb::Options::default();
-    options.create_if_missing(true);
-
-    // FIXME: Have to replace OptimisticTransactionDB with DBWithTTL :'(
-    let db = RawDb::open_cf_descriptors(&options, &db_dir, descriptors)?;
+    let mut options = DbOptions::default();
+    options.create_if_missing = true;
+    let db = Db::open(&db_dir, &options, descriptors)?;
 
     Ok((version, db))
 }
@@ -153,9 +148,8 @@ impl Migrator {
     pub(crate) fn migrate(&mut self) -> Result<()> {
         while let Some(next_version) = self.version.next() {
             self.log_migration(next_version);
-            for &cf in next_version.column_families() {
-                let (name, options, ttl) = cf.descriptor();
-                self.db.create_cf(name, &options)?;
+            for cf in next_version.column_families() {
+                self.db.create_column_family(cf)?;
             }
             self.write_version(next_version)?;
         }

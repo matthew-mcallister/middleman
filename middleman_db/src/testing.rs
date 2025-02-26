@@ -40,9 +40,8 @@ impl TestDb {
         }
 
         let db_dir = self.db_dir().to_owned();
-        let options = DbOptions {
-            create_if_missing: true,
-        };
+        let mut options = DbOptions::default();
+        options.create_if_missing = true;
         let empty: &[(&str, &rocksdb::Options, rocksdb::ColumnFamilyTtl)] = &[];
         self.db = Some(Arc::new(
             Db::open(&db_dir, &options, empty.iter().cloned()).unwrap(),

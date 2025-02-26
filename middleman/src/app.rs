@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use uuid::Uuid;
+use db::{Db, Transaction};
+use middleman_db as db;
 
 use crate::config::Config;
 use crate::delivery::DeliveryTable;
@@ -9,8 +9,6 @@ use crate::error::Result;
 use crate::event::{Event, EventTable};
 use crate::migration::Migrator;
 use crate::subscriber::SubscriberTable;
-use crate::transaction::{Transaction, TransactionLock};
-use crate::types::Db;
 
 pub struct Application {
     pub(crate) config: Box<Config>,
@@ -26,7 +24,6 @@ impl Application {
         migrator.migrate()?;
         let db = Arc::new(migrator.unwrap());
 
-        let transaction_lock = TransactionLock::new(Duration::from_secs(60));
         let events = EventTable::new(Arc::clone(&db))?;
         let deliveries = DeliveryTable::new(Arc::clone(&db))?;
         let subscribers = SubscriberTable::new(Arc::clone(&db))?;
@@ -34,7 +31,6 @@ impl Application {
         Ok(Self {
             config,
             db,
-            transaction_lock,
             events,
             deliveries,
             subscribers,
@@ -44,7 +40,7 @@ impl Application {
     pub fn create_event(&self, event: &Event) -> Result<u64> {
         let mut opts = rocksdb::OptimisticTransactionOptions::new();
         opts.set_snapshot(true);
-        let mut txn = Transaction::new(self);
+        let mut txn = Transaction::new(&self.db);
         let id = self.events.create(&mut txn, event)?;
         self.create_deliveries_for_event(&mut txn, id, event)?;
         txn.commit()?;
@@ -68,14 +64,14 @@ impl Application {
 #[cfg(test)]
 mod tests {
     use byteview::ByteView;
+    use db::Transaction;
+    use middleman_db as db;
     use regex::Regex;
     use url::Url;
 
-    use crate::error::ErrorKind;
     use crate::event::EventBuilder;
     use crate::subscriber::SubscriberBuilder;
     use crate::testing::TestHarness;
-    use crate::transaction::Transaction;
     use crate::types::ContentType;
 
     #[test]
@@ -109,7 +105,7 @@ mod tests {
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
 
         // Create two subscribers
-        let mut txn = Transaction::new(app);
+        let mut txn = Transaction::new(&app.db);
         let url = "https://example.com/webhook";
         let subscriber1_id = uuid::uuid!("12120000-0000-8000-8000-000000000001");
         let subscriber1 = SubscriberBuilder::new()
@@ -156,9 +152,12 @@ mod tests {
         let app = harness.application();
 
         let key: ByteView = [1u8, 2, 3, 4].into();
-        let mut txn1 = Transaction::new(app);
+        let mut txn1 = Transaction::new(&app.db);
         txn1.lock_key(key.clone()).unwrap();
-        let mut txn2 = Transaction::new(app);
-        assert_eq!(txn2.lock_key(key).unwrap_err().kind(), ErrorKind::Busy);
+        let mut txn2 = Transaction::new(&app.db);
+        assert_eq!(
+            txn2.lock_key(key).unwrap_err().kind(),
+            db::ErrorKind::TransactionConflict
+        );
     }
 }
