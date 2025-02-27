@@ -23,6 +23,7 @@ impl<'a> From<&'a DbOptions> for rocksdb::Options {
     }
 }
 
+#[derive(Debug)]
 pub struct Db {
     pub(crate) raw: RawDb,
     pub(crate) transaction_lock: TransactionLock,

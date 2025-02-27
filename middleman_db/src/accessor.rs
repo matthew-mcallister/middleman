@@ -36,7 +36,7 @@ impl<
 
     pub unsafe fn get_unchecked(&self, key: &K) -> Result<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
-        match self.db().raw.get_cf(&**self.cf, key)? {
+        match self.db().raw.get_cf(self.cf.raw(), key)? {
             Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
             None => Ok(None),
         }
@@ -59,7 +59,7 @@ impl<
         // though uninitialized bytes should be safe
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
-        Ok(self.db().raw.put_cf(&**self.cf, key, value)?)
+        Ok(self.db().raw.put_cf(self.cf.raw(), key, value)?)
     }
 
     pub fn put_txn(&self, txn: &mut Transaction<'_>, key: &K, value: &V) {
@@ -75,7 +75,7 @@ impl<
     }
 
     pub unsafe fn cursor_unchecked(&self) -> BaseCursor<'db, K, V> {
-        BaseCursor::<'_, K, V>::new(self.db().raw.raw_iterator_cf(&**self.cf))
+        BaseCursor::<'_, K, V>::new(self.db().raw.raw_iterator_cf(self.cf.raw()))
     }
 }
 

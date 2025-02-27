@@ -103,7 +103,7 @@ impl<'db> Transaction<'db> {
         cf: &ColumnFamily,
         key: impl AsRef<[u8]>,
     ) -> Result<Option<Vec<u8>>> {
-        Ok(self.db.raw.get_cf(&**cf, key)?)
+        Ok(self.db.raw.get_cf(cf.raw(), key)?)
     }
 
     pub(crate) fn put_cf(
@@ -112,7 +112,7 @@ impl<'db> Transaction<'db> {
         key: impl AsRef<[u8]>,
         value: impl AsRef<[u8]>,
     ) {
-        self.write_batch.put_cf(&**cf, key, value);
+        self.write_batch.put_cf(cf.raw(), key, value);
     }
 
     pub(crate) fn put_cf_locked(
@@ -130,7 +130,7 @@ impl<'db> Transaction<'db> {
         &'a self,
         cf: &ColumnFamily,
     ) -> rocksdb::DBRawIteratorWithThreadMode<'a, RawDb> {
-        self.db.raw.raw_iterator_cf(&**cf)
+        self.db.raw.raw_iterator_cf(cf.raw())
     }
 
     pub fn commit(self) -> Result<()> {

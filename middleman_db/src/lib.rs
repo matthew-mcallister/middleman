@@ -9,6 +9,7 @@ pub mod error;
 pub mod key;
 pub mod model;
 pub mod prefix;
+pub mod sequence;
 #[cfg(test)]
 pub mod testing;
 pub mod transaction;
@@ -24,4 +25,5 @@ pub use column_family::{ColumnFamily, ColumnFamilyDescriptor};
 pub use cursor::Cursor;
 pub use db::{Db, DbOptions};
 pub use error::{Error, ErrorKind, Result};
+pub use sequence::Sequence;
 pub use transaction::Transaction;

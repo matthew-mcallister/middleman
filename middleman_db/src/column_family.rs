@@ -1,24 +1,37 @@
-use std::ops::Deref;
 use std::sync::Arc;
 
 use owning_ref::OwningRef;
 
 use crate::db::Db;
+use crate::error::Result;
 
 #[derive(Clone)]
 pub struct ColumnFamily(pub(crate) OwningRef<Arc<Db>, rocksdb::ColumnFamily>);
 
-impl Deref for ColumnFamily {
-    type Target = rocksdb::ColumnFamily;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
-}
-
 impl ColumnFamily {
     pub fn db(&self) -> &Db {
         self.0.as_owner()
+    }
+
+    pub fn raw(&self) -> &rocksdb::ColumnFamily {
+        &*self.0
+    }
+
+    pub(crate) fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
+        Ok(self.db().raw.get_cf(self.raw(), key.as_ref())?)
+    }
+
+    pub(crate) fn put(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
+        Ok(self.db().raw.put_cf(self.raw(), key, value)?)
+    }
+}
+
+impl std::fmt::Debug for ColumnFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ColumnFamily")
+            .field("owner", &self.0.as_owner())
+            .field("reference", &"<rocksdb::ColumnFamily>")
+            .finish()
     }
 }
 
