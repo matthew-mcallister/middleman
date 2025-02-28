@@ -84,6 +84,7 @@ impl Version {
         match self {
             Self::V0 => &[],
             Self::V1 => &[
+                ColumnFamilyName::Meta,
                 ColumnFamilyName::Deliveries,
                 ColumnFamilyName::Subscribers,
                 ColumnFamilyName::Events,

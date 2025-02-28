@@ -4,6 +4,7 @@ use strum_macros::{IntoStaticStr, VariantNames};
 
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq, VariantNames)]
 pub(crate) enum ColumnFamilyName {
+    Meta,
     Deliveries,
     Events,
     EventTagIdempotencyKeyIndex,

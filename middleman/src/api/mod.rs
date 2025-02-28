@@ -8,7 +8,7 @@ use serde_derive::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::Result;
-use crate::event::{Event, EventBuilder};
+use crate::event::EventBuilder;
 use crate::types::ContentType;
 use crate::Application;
 
@@ -29,8 +29,8 @@ struct ListEvents {
     max_results: Option<u64>,
 }
 
-impl From<PutEvent> for Box<Event> {
-    fn from(value: PutEvent) -> Self {
+impl<'a> From<&'a PutEvent> for EventBuilder<'a> {
+    fn from(value: &'a PutEvent) -> Self {
         let mut builder = EventBuilder::new();
         builder
             .idempotency_key(value.idempotency_key)
@@ -38,7 +38,7 @@ impl From<PutEvent> for Box<Event> {
             .content_type(value.content_type)
             .stream(&value.stream)
             .payload(value.payload.as_bytes());
-        builder.build()
+        builder
     }
 }
 
@@ -48,8 +48,8 @@ pub fn router(app: Arc<Application>) -> Router {
         post({
             let app = Arc::clone(&app);
             async move |Json(event): Json<PutEvent>| -> Result<_> {
-                let event: Box<Event> = event.into();
-                app.create_event(&event)?;
+                let event: EventBuilder<'_> = (&event).into();
+                app.create_event(event)?;
                 Ok(StatusCode::CREATED)
             }
         })

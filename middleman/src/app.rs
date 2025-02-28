@@ -6,7 +6,7 @@ use middleman_db as db;
 use crate::config::Config;
 use crate::delivery::DeliveryTable;
 use crate::error::Result;
-use crate::event::{Event, EventTable};
+use crate::event::{Event, EventBuilder, EventTable};
 use crate::migration::Migrator;
 use crate::subscriber::SubscriberTable;
 
@@ -37,14 +37,14 @@ impl Application {
         })
     }
 
-    pub fn create_event(&self, event: &Event) -> Result<u64> {
+    pub fn create_event(&self, builder: EventBuilder<'_>) -> Result<Box<Event>> {
         let mut opts = rocksdb::OptimisticTransactionOptions::new();
         opts.set_snapshot(true);
         let mut txn = Transaction::new(&self.db);
-        let id = self.events.create(&mut txn, event)?;
-        self.create_deliveries_for_event(&mut txn, id, event)?;
+        let event = self.events.create(&mut txn, builder)?;
+        self.create_deliveries_for_event(&mut txn, event.id(), &event)?;
         txn.commit()?;
-        Ok(id)
+        Ok(event)
     }
 
     fn create_deliveries_for_event(
@@ -81,20 +81,20 @@ mod tests {
 
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000001");
-        let event = EventBuilder::new()
+        let mut builder = EventBuilder::new();
+        builder
             .content_type(ContentType::Json)
             .tag(tag)
             .stream("asdf")
             .payload(b"1234321")
-            .idempotency_key(idempotency_key)
-            .build();
-        let id = app.create_event(&event).unwrap();
+            .idempotency_key(idempotency_key);
+        let event = app.create_event(builder.clone()).unwrap();
 
-        let event2 = app.events.get(tag, id).unwrap().unwrap();
-        assert_eq!(*event, *event2);
+        let event2 = app.events.get(tag, event.id()).unwrap().unwrap();
+        assert_eq!(event, event2);
 
-        let id2 = app.create_event(&event).unwrap();
-        assert_eq!(id, id2);
+        let event2 = app.create_event(builder).unwrap();
+        assert_eq!(event, event2);
     }
 
     #[test]
@@ -129,19 +129,19 @@ mod tests {
 
         // Create an event that matches both subscribers
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000000");
-        let event = EventBuilder::new()
+        let mut event = EventBuilder::new();
+        event
             .content_type(ContentType::Json)
             .tag(tag)
             .stream("asdf:1234")
             .payload(b"1234321")
-            .idempotency_key(idempotency_key)
-            .build();
-        let event_id = app.create_event(&event).unwrap();
+            .idempotency_key(idempotency_key);
+        let event = app.create_event(event).unwrap();
 
-        let delivery1 = app.deliveries.get(subscriber1_id, event_id).unwrap().unwrap();
+        let delivery1 = app.deliveries.get(subscriber1_id, event.id()).unwrap().unwrap();
         assert_eq!(delivery1.attempts_made(), 0);
 
-        let delivery2 = app.deliveries.get(subscriber2_id, event_id).unwrap().unwrap();
+        let delivery2 = app.deliveries.get(subscriber2_id, event.id()).unwrap().unwrap();
         assert_eq!(delivery2.attempts_made(), 0);
     }
 

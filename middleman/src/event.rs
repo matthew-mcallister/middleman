@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use db::big_tuple::{big_tuple, BigTuple};
@@ -6,7 +5,7 @@ use db::bytes::AsBytes;
 use db::key::{packed, BigEndianU64, Packed2, Packed3};
 use db::model::big_tuple_struct;
 use db::{Accessor, ColumnFamily, Cursor, Db, Transaction};
-use middleman_db::{self as db, ColumnFamilyDescriptor};
+use middleman_db::{self as db, ColumnFamilyDescriptor, Sequence};
 use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use serde::Serialize;
 use uuid::Uuid;
@@ -21,6 +20,7 @@ use crate::types::ContentType;
 struct EventHeader {
     idempotency_key: Uuid,
     tag: Uuid,
+    id: u64,
     _reserved: [u64; 2],
 }
 
@@ -36,6 +36,10 @@ big_tuple_struct! {
 }
 
 impl Event {
+    pub fn id(&self) -> u64 {
+        self.header().id
+    }
+
     pub fn content_type(&self) -> ContentType {
         // TODO: Read content type from flags
         ContentType::Json
@@ -104,11 +108,12 @@ impl<'a> EventBuilder<'a> {
         self
     }
 
-    pub fn build(&mut self) -> Box<Event> {
+    pub(crate) fn build(&mut self, id: u64) -> Box<Event> {
         Event::new(
             &EventHeader {
                 tag: self.tag.unwrap(),
                 idempotency_key: self.idempotency_key.unwrap(),
+                id,
                 _reserved: [0; 2],
             },
             self.stream.unwrap(),
@@ -118,8 +123,7 @@ impl<'a> EventBuilder<'a> {
 }
 
 pub(crate) struct EventTable {
-    // XXX: Need a persistent autoincrement implementation
-    event_sequence_number: AtomicU64,
+    id_sequence: db::Sequence,
     cf: ColumnFamily,
     tag_idempotency_index_cf: ColumnFamily,
     tag_stream_index_cf: ColumnFamily,
@@ -140,8 +144,9 @@ impl EventTable {
             db.get_column_family(ColumnFamilyName::EventTagIdempotencyKeyIndex.name()).unwrap();
         let tag_stream_index_cf =
             db.get_column_family(ColumnFamilyName::EventTagStreamIndex.name()).unwrap();
+        let meta_cf = db.get_column_family(ColumnFamilyName::Meta.name()).unwrap();
         Ok(Self {
-            event_sequence_number: AtomicU64::new(0),
+            id_sequence: Sequence::new(meta_cf, "event_id")?,
             cf,
             tag_idempotency_index_cf,
             tag_stream_index_cf,
@@ -165,21 +170,26 @@ impl EventTable {
     /// guaranteed to be ordered.
     // XXX: Is it possible to catch write conflicts and report those as a
     // unique status so the operation need not be retried?
-    pub fn create(&self, txn: &mut Transaction<'_>, event: &Event) -> Result<u64> {
-        let (tag, idempotency_key) = (event.tag(), event.idempotency_key());
+    pub fn create(
+        &self,
+        txn: &mut Transaction<'_>,
+        mut builder: EventBuilder,
+    ) -> Result<Box<Event>> {
+        let (tag, idempotency_key) = (builder.tag.unwrap(), builder.idempotency_key.unwrap());
 
         // Acquire lock
-        let key: Packed3<[u8; 5], Uuid, Uuid> = (*b"event", tag, idempotency_key).into();
+        let key: Packed3<[u8; 6], Uuid, Uuid> = (*b"event:", tag, idempotency_key).into();
         txn.lock_key(AsBytes::as_bytes(&key).into())?;
 
         // Try to fetch existing record by idempotency key
         let existing_id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
         if let Some(id) = existing_id {
-            return Ok(id);
+            return Ok(builder.build(id));
         }
 
         // Create primary record
-        let id = self.event_sequence_number.fetch_add(1, Ordering::Relaxed);
+        let id = self.id_sequence.next()?;
+        let event = builder.build(id);
         self.accessor().put_txn(txn, &packed!(tag, id.into()), &event);
 
         // Index by tag + idempotency key
@@ -190,7 +200,7 @@ impl EventTable {
         let key = EventStreamIndexKey::new(&tag, event.stream(), &id.into());
         self.tag_stream_index_accessor().put_txn(txn, &key, &());
 
-        Ok(id)
+        Ok(event)
     }
 
     pub fn get(&self, tag: Uuid, id: u64) -> Result<Option<Box<Event>>> {
@@ -219,25 +229,21 @@ impl EventTable {
         txn: &mut Transaction<'_>,
         tag: Uuid,
         idempotency_key: Uuid,
-    ) -> Result<Option<(u64, Box<Event>)>> {
+    ) -> Result<Option<Box<Event>>> {
         let id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
         let Some(id) = id else { return Ok(None) };
         let Some(event) = self.get(tag, id)? else { return Ok(None) };
-        Ok(Some((id, event)))
+        Ok(Some(event))
     }
 
     pub fn iter_by_tag<'a>(
         &'a self,
         tag: Uuid,
         starting_id: u64,
-    ) -> impl Iterator<Item = Result<(u64, Box<Event>)>> + 'a {
+    ) -> impl Iterator<Item = Result<Box<Event>>> + 'a {
         let mut cursor = unsafe { self.accessor().cursor_unchecked() };
         cursor.seek(&packed!(tag, starting_id.into()));
-        cursor.prefix::<[u8; 16]>(*tag.as_bytes()).into_iter().map(move |item| {
-            let (key, value) = item?;
-            let id = key.1;
-            Ok((id.into(), value))
-        })
+        cursor.prefix::<[u8; 16]>(*tag.as_bytes()).values().map(|x| x.map_err(Into::into))
     }
 
     pub fn iter_by_stream<'a>(
@@ -245,7 +251,7 @@ impl EventTable {
         tag: Uuid,
         stream: &str,
         starting_id: u64,
-    ) -> impl Iterator<Item = Result<(u64, Box<Event>)>> + 'a {
+    ) -> impl Iterator<Item = Result<Box<Event>>> + 'a {
         let prefix = big_tuple!(&tag, stream);
         let mut cursor = unsafe { self.tag_stream_index_accessor().cursor_unchecked() };
         let seek_to = EventStreamIndexKey::new(&tag, stream, &starting_id.into());
@@ -255,7 +261,7 @@ impl EventTable {
             // XXX: These access are monotonic and should be highly coherent.
             // Is there a way to make them faster?
             let event = self.get(tag, id.into())?.unwrap();
-            Ok((id.into(), event))
+            Ok(event)
         })
     }
 }
@@ -265,7 +271,7 @@ mod tests {
     use db::transaction::Transaction;
     use middleman_db as db;
 
-    use super::{ContentType, Event, EventBuilder};
+    use super::{ContentType, EventBuilder};
     use crate::error::ErrorKind;
     use crate::testing::TestHarness;
 
@@ -281,7 +287,7 @@ mod tests {
             .stream(stream)
             .tag(tag)
             .payload(payload)
-            .build();
+            .build(0);
         assert_eq!(event.content_type(), ContentType::Json);
         assert_eq!(event.stream(), stream);
         assert_eq!(event.tag(), tag);
@@ -289,14 +295,15 @@ mod tests {
         assert_eq!(event.payload(), payload);
     }
 
-    fn testing_event() -> Box<Event> {
-        EventBuilder::new()
+    fn testing_event() -> EventBuilder<'static> {
+        let mut builder = EventBuilder::new();
+        builder
             .content_type(ContentType::Json)
             .tag(uuid::uuid!("00000000-0000-8000-8000-000000000000"))
             .stream("asdf")
             .payload(b"1234321")
-            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"))
-            .build()
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"));
+        builder
     }
 
     #[test]
@@ -307,10 +314,10 @@ mod tests {
 
         let event = testing_event();
         let mut txn = Transaction::new(&app.db);
-        let id = events.create(&mut txn, &event).unwrap();
+        let event = events.create(&mut txn, event).unwrap();
         txn.commit().unwrap();
 
-        let event2 = events.get(event.tag(), id).unwrap().unwrap();
+        let event2 = events.get(event.tag(), event.id()).unwrap().unwrap();
         assert_eq!(&*event, &*event2);
     }
 
@@ -322,23 +329,22 @@ mod tests {
         let app = harness.application();
         let events = &app.events;
 
-        let event = testing_event();
+        let builder = testing_event();
         let mut txn = Transaction::new(&app.db);
-        let id = events.create(&mut txn, &event).unwrap();
+        let event = events.create(&mut txn, builder.clone()).unwrap();
         txn.commit().unwrap();
 
         let mut txn = Transaction::new(&app.db);
-        let id2 = events.create(&mut txn, &event).unwrap();
+        let event2 = events.create(&mut txn, builder).unwrap();
         txn.commit().unwrap();
-        assert_eq!(id, id2);
+        assert_eq!(event, event2);
 
         // Also test lookup by idempotency key
         let mut txn = Transaction::new(&app.db);
-        let (id2, event2) = events
+        let event2 = events
             .get_by_idempotency_key(&mut txn, event.tag(), event.idempotency_key())
             .unwrap()
             .unwrap();
-        assert_eq!(id, id2);
         assert_eq!(event, event2);
         txn.commit().unwrap();
     }
@@ -353,39 +359,35 @@ mod tests {
         let mut base = EventBuilder::new();
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         base.content_type(ContentType::Json).tag(tag);
-        let event1 = base
-            .clone()
+        let mut event1 = base.clone();
+        event1
             .stream("stream1")
             .payload(b"1")
-            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"))
-            .build();
-        let id1 = events.create(&mut txn, &event1).unwrap();
-        let event2 = base
-            .clone()
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"));
+        let event1 = events.create(&mut txn, event1).unwrap();
+        let mut event2 = base.clone();
+        event2
             .stream("stream0")
             .payload(b"2")
-            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000002"))
-            .build();
-        let _id2 = events.create(&mut txn, &event2).unwrap();
-        let event3 = base
-            .clone()
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000002"));
+        let _event2 = events.create(&mut txn, event2).unwrap();
+        let mut event3 = base.clone();
+        event3
             .stream("stream1")
             .payload(b"3")
-            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000003"))
-            .build();
-        let id3 = events.create(&mut txn, &event3).unwrap();
-        let event4 = base
-            .clone()
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000003"));
+        let event3 = events.create(&mut txn, event3).unwrap();
+        let mut event4 = base.clone();
+        event4
             .stream("strm2")
             .payload(b"4")
-            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000004"))
-            .build();
-        let _id4 = events.create(&mut txn, &event4).unwrap();
+            .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000004"));
+        let _event4 = events.create(&mut txn, event4).unwrap();
         txn.commit().unwrap();
 
         let mut iter = events.iter_by_stream(tag, "stream1", 0);
-        assert_eq!(iter.next().unwrap().unwrap(), (id1, event1));
-        assert_eq!(iter.next().unwrap().unwrap(), (id3, event3));
+        assert_eq!(iter.next().unwrap().unwrap(), event1);
+        assert_eq!(iter.next().unwrap().unwrap(), event3);
         assert!(iter.next().is_none());
     }
 
@@ -397,11 +399,11 @@ mod tests {
 
         let event = testing_event();
         let mut txn1 = Transaction::new(&app.db);
-        events.create(&mut txn1, &event).unwrap();
+        events.create(&mut txn1, event.clone()).unwrap();
 
         let mut txn2 = Transaction::new(&app.db);
         assert_eq!(
-            events.create(&mut txn2, &event).unwrap_err().kind(),
+            events.create(&mut txn2, event).unwrap_err().kind(),
             ErrorKind::Busy
         );
     }
