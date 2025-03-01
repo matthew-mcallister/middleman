@@ -49,7 +49,7 @@ struct SlotHandle(NonZeroU16);
 
 impl From<usize> for SlotHandle {
     fn from(value: usize) -> SlotHandle {
-        unsafe { Self(NonZeroU16::new_unchecked((value + 1) as u16)) }
+        Self(NonZeroU16::new((value + 1) as u16).unwrap())
     }
 }
 
@@ -230,14 +230,9 @@ pub struct ConnectionHandle<'pool, C: Connection> {
     connection: *mut C,
 }
 
+unsafe impl<'pool, C: Connection> Send for ConnectionHandle<'pool, C> {}
 unsafe impl<'pool, C: Connection> Sync for ConnectionHandle<'pool, C> {}
 
-// XXX: This deref impl isn't *truly* safe. If the lease is held past its
-// expiration, then the connection could be destroyed by another thread while
-// we are still using it, the premise being that a connection will never be
-// held past the lease expiration unless the owner is dead. But, of course,
-// it's trivial to intentionally cause this to happen. Would take some
-// creativity to rigorously solve this.
 impl<'pool, C: Connection> std::ops::Deref for ConnectionHandle<'pool, C> {
     type Target = C;
 
@@ -435,6 +430,7 @@ impl<C: Connection> Http11ConnectionPool<C> {
                 }
 
                 // Dispose of connection and pop from host pool
+                // safety: We hold the lock and the slot is unleased
                 *state = SlotState::Free;
                 unsafe { slot.dispose_connection() }
                 host.idle_connections.pop_front();
@@ -448,7 +444,14 @@ impl<C: Connection> Http11ConnectionPool<C> {
 
     /// Recycles connections which have expired leases. We assume that any
     /// connection that is held for longer than the lease duration is a leak.
-    pub fn recycle_leaks(&self) {
+    ///
+    /// # Safety
+    ///
+    /// This method is unsafe if any of the connections with expired leases are
+    /// still in use.
+    // TODO: Instead of tracking time, just attach a reference ID and
+    // invalidate by ID. This passes the actual leak detection to the caller.
+    pub unsafe fn recycle_leaks(&self) {
         for (index, slot) in self.slots.iter().enumerate() {
             let mut state = slot.state.lock();
             if let Some(lease) = state.lease() {
@@ -546,14 +549,14 @@ mod tests {
         std::mem::forget(handle);
 
         // Slot is not reclaimed prematurely
-        pool.recycle_leaks();
+        unsafe { pool.recycle_leaks() };
         tokio::task::yield_now().await;
         assert_eq!(pool.free_slots.lock().len(), 255);
         assert_eq!(num_connections.load(Ordering::Relaxed), 1);
 
         // Slot is reclaimed, connection destroyed
         tokio::time::advance(Duration::from_secs(301)).await;
-        pool.recycle_leaks();
+        unsafe { pool.recycle_leaks() };
         tokio::task::yield_now().await;
         assert_eq!(pool.free_slots.lock().len(), 256);
         assert_eq!(num_connections.load(Ordering::Relaxed), 0);
