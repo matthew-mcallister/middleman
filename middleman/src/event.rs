@@ -52,6 +52,13 @@ impl Event {
     pub fn tag(&self) -> Uuid {
         self.header().tag
     }
+
+    pub fn payload_string(&self) -> &str {
+        match self.content_type() {
+            ContentType::Json => std::str::from_utf8(self.payload()).unwrap(),
+            // Should be base64 encoded if the payload is binary
+        }
+    }
 }
 
 impl Serialize for Event {
@@ -61,10 +68,17 @@ impl Serialize for Event {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("Event", 4)?;
+        state.serialize_field("id", &self.id())?;
         state.serialize_field("idempotency_key", &self.idempotency_key())?;
         state.serialize_field("tag", &self.tag())?;
         state.serialize_field("stream", self.stream())?;
-        state.serialize_field("payload", self.payload())?;
+        // XXX: Maybe omit this if it's already the default (application/json)?
+        state.serialize_field("content_type", &self.content_type())?;
+        match self.content_type() {
+            ContentType::Json => {
+                state.serialize_field("payload", self.payload_string())?;
+            },
+        }
         state.end()
     }
 }

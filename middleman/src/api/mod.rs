@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::Query;
-use axum::routing::{post, Router};
+use axum::routing::{put, Router};
 use axum::Json;
 use hyper::StatusCode;
 use serde_derive::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ impl<'a> From<&'a PutEvent> for EventBuilder<'a> {
 pub fn router(app: Arc<Application>) -> Router {
     Router::new().route(
         "/events",
-        post({
+        put({
             let app = Arc::clone(&app);
             async move |Json(event): Json<PutEvent>| -> Result<_> {
                 let event: EventBuilder<'_> = (&event).into();
