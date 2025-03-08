@@ -1,6 +1,6 @@
-use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::mem::ManuallyDrop;
 use std::num::{NonZeroU16, NonZeroU64};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -9,7 +9,6 @@ use std::time::Duration;
 use compact_str::CompactString;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use rand::random;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -27,22 +26,6 @@ pub trait ConnectionFactory {
         keep_alive_secs: u16,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send>>;
 }
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ConnectionPoolError {
-    /// Occurs when the lease on a connection expires.
-    LeaseExpired,
-}
-
-impl std::fmt::Display for ConnectionPoolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            Self::LeaseExpired => write!(f, "lease expired"),
-        }
-    }
-}
-
-impl std::error::Error for ConnectionPoolError {}
 
 /// Index into the pool of slots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,22 +72,12 @@ struct Lease {
     /// Identifies the current owner of the lease
     // We use NonZeroU64 to get the free niche optimization
     id: NonZeroU64,
-    /// Tracks lease lifespan for recycling
-    acquired_at: Instant,
     host_key: HostKey,
 }
 
 impl Lease {
-    fn new(host_key: HostKey) -> Self {
-        Self {
-            id: NonZeroU64::new(std::cmp::max(1, random::<u64>())).unwrap(),
-            acquired_at: Instant::now(),
-            host_key,
-        }
-    }
-
-    fn held_duration(&self) -> Duration {
-        Instant::now().duration_since(self.acquired_at)
+    fn new(id: NonZeroU64, host_key: HostKey) -> Self {
+        Self { id, host_key }
     }
 }
 
@@ -124,31 +97,22 @@ impl Lease {
 /// is not released before it expires, it is assumed that the owning task is
 /// dead and the connection is invalid, and the slot will be recycled to the
 /// free pool.
-struct Slot<C: Connection> {
-    state: Mutex<SlotState>,
-    connection: UnsafeCell<Option<Box<C>>>,
-}
-
-unsafe impl<C: Connection> Send for Slot<C> {}
-unsafe impl<C: Connection> Sync for Slot<C> {}
-
-#[derive(Clone, Debug)]
-enum SlotState {
+enum Slot<C> {
     Leased(Lease),
-    IdleSince(Instant),
+    IdleSince(Instant, Box<C>),
     Free,
 }
 
-impl Default for SlotState {
+impl<C> Default for Slot<C> {
     fn default() -> Self {
         Self::Free
     }
 }
 
-impl SlotState {
+impl<C> Slot<C> {
     // Returns an idle state with the current timestamp
-    fn idle() -> Self {
-        Self::IdleSince(Instant::now())
+    fn idle(connection: Box<C>) -> Self {
+        Self::IdleSince(Instant::now(), connection)
     }
 
     fn lease(&self) -> Option<&Lease> {
@@ -163,35 +127,6 @@ impl SlotState {
     }
 }
 
-impl<C: Connection> Default for Slot<C> {
-    fn default() -> Self {
-        Self {
-            state: Default::default(),
-            connection: Default::default(),
-        }
-    }
-}
-
-impl<C: Connection> Drop for Slot<C> {
-    fn drop(&mut self) {
-        drop(self.connection.get_mut().take());
-    }
-}
-
-impl<C: Connection> Slot<C> {
-    /// Unsafely disposes of the connection in this slot. This is unsafe as
-    /// another thread may be using the connection when this occurs. The state
-    /// lock should be acquired to prevent racing. The connection will be
-    /// disposed of asynchronously.
-    unsafe fn dispose_connection(&self) {
-        let connection = (*self.connection.get()).take();
-        // Fire the connection off into outer space
-        // TODO: This makes the connection cap into a soft cap rather than a
-        // hard cap, so maybe it should be done synchronously?
-        tokio::spawn(async move { drop(connection) });
-    }
-}
-
 #[derive(Debug)]
 struct PerHostPool {
     max_connections: u16,
@@ -200,66 +135,94 @@ struct PerHostPool {
     idle_timeout: u16,
     total_connections: u16,
     idle_connections: VecDeque<SlotHandle>,
+    // XXX: This really shouldn't be behind a lock
     notify_idle: Arc<Notify>,
 }
 
 impl PerHostPool {
     fn idle_timeout(&self) -> Duration {
-        // We subtract 3 sec since it's better to reap timed out connections
-        // slightly early rather than after it's too late
-        Duration::from_secs(self.idle_timeout as u64 - 3)
+        // We subtract 2 sec since it's better to reap timed out connections
+        // slightly early rather than too late
+        Duration::from_secs(self.idle_timeout as u64 - 2)
     }
 }
 
 // Provides the destructor for ConnectionHandle
 struct LeasedSlot<'pool, C: Connection> {
+    id: NonZeroU64,
     pool: &'pool Http11ConnectionPool<C>,
     handle: SlotHandle,
 }
 
 impl<'pool, C: Connection> LeasedSlot<'pool, C> {
-    fn slot(&self) -> &'pool Slot<C> {
+    fn slot(&self) -> &'pool Mutex<Slot<C>> {
         &self.pool.slots[self.handle.to_index()]
+    }
+
+    fn release(&mut self, connection: Option<Box<C>>) {
+        if let Some(c) = connection {
+            let mut slot = self.slot().lock();
+            match slot.lease() {
+                // Lease was already reclaimed; nothing to do
+                None => return,
+                Some(lease) if lease.id != self.id => return,
+                // We still have the lease
+                _ => {},
+            };
+
+            let old_state = std::mem::replace(&mut *slot, Slot::idle(c));
+            drop(slot);
+
+            // Return to idle pool
+            let host = &old_state.lease().unwrap().host_key;
+            self.pool.push_idle(host, self.handle);
+        } else {
+            *self.slot().lock() = Slot::Free;
+            self.pool.push_free(self.handle);
+        };
     }
 }
 
-impl<'pool, C: Connection> Drop for LeasedSlot<'pool, C> {
-    fn drop(&mut self) {
-        // Add to idle connection pool and release lease
-        let mut state = self.slot().state.lock();
-        let host = &state.lease().unwrap().host_key;
-        let mut pool = self.pool.hosts.get_mut(host).unwrap();
-        pool.idle_connections.push_back(self.handle);
-        *state = SlotState::idle();
-        drop(state);
+#[repr(transparent)]
+struct TmpLeasedSlot<'pool, C: Connection>(LeasedSlot<'pool, C>);
 
-        // Notify waiters after unlocking pool
-        let notify = Arc::clone(&pool.notify_idle);
-        drop(pool);
-        notify.notify_one();
+impl<'pool, C: Connection> Drop for TmpLeasedSlot<'pool, C> {
+    fn drop(&mut self) {
+        self.0.release(None);
+    }
+}
+
+impl<'pool, C: Connection> TmpLeasedSlot<'pool, C> {
+    fn into_inner(self) -> LeasedSlot<'pool, C> {
+        // XXX: Is this really the only way to implement into_inner...?
+        unsafe { std::mem::transmute(self) }
     }
 }
 
 /// Exclusive handle to a connection within the pool.
 pub struct ConnectionHandle<'pool, C: Connection> {
-    _slot: LeasedSlot<'pool, C>,
-    connection: *mut C,
+    slot: LeasedSlot<'pool, C>,
+    connection: ManuallyDrop<Box<C>>,
 }
-
-unsafe impl<'pool, C: Connection> Send for ConnectionHandle<'pool, C> {}
-unsafe impl<'pool, C: Connection> Sync for ConnectionHandle<'pool, C> {}
 
 impl<'pool, C: Connection> std::ops::Deref for ConnectionHandle<'pool, C> {
     type Target = C;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.connection }
+        &*self.connection
     }
 }
 
 impl<'pool, C: Connection> std::ops::DerefMut for ConnectionHandle<'pool, C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.connection }
+        &mut *self.connection
+    }
+}
+
+impl<'pool, C: Connection> Drop for ConnectionHandle<'pool, C> {
+    fn drop(&mut self) {
+        let cxn = unsafe { ManuallyDrop::take(&mut self.connection) };
+        self.slot.release(Some(cxn));
     }
 }
 
@@ -268,7 +231,6 @@ pub struct Http11ConnectionPoolSettings {
     max_connections: u16,
     max_connections_per_host: u16,
     idle_timeout_seconds: u16,
-    lease_expiration_seconds: u16,
 }
 
 impl Default for Http11ConnectionPoolSettings {
@@ -277,9 +239,6 @@ impl Default for Http11ConnectionPoolSettings {
             max_connections: 256,
             max_connections_per_host: 16,
             idle_timeout_seconds: 60,
-            // It is the user's responsibility to set a response timeout less
-            // than this value.
-            lease_expiration_seconds: 300,
         }
     }
 }
@@ -290,7 +249,7 @@ impl Default for Http11ConnectionPoolSettings {
 pub struct Http11ConnectionPool<C: Connection> {
     settings: Http11ConnectionPoolSettings,
     connection_factory: Box<dyn ConnectionFactory<Connection = C>>,
-    slots: Box<[Slot<C>]>,
+    slots: Box<[Mutex<Slot<C>>]>,
     hosts: DashMap<HostKey, PerHostPool>,
     // Notifies waiters that there is a free slot available
     notify_free: Notify,
@@ -319,8 +278,12 @@ impl<C: Connection> Http11ConnectionPool<C> {
         }
     }
 
-    fn lease_expiration(&self) -> Duration {
-        Duration::from_secs(self.settings.lease_expiration_seconds as u64)
+    fn push_idle(&self, host: &HostKey, handle: SlotHandle) {
+        let mut pool = self.hosts.get_mut(host).unwrap();
+        pool.idle_connections.push_back(handle);
+        let notify = Arc::clone(&pool.notify_idle);
+        drop(pool);
+        notify.notify_one();
     }
 
     fn push_free(&self, handle: SlotHandle) {
@@ -333,9 +296,10 @@ impl<C: Connection> Http11ConnectionPool<C> {
     /// assigning a connection.
     fn acquire_lease<'a>(
         &'a self,
+        lease_id: NonZeroU64,
         tag: Uuid,
         host_string: &'a str,
-    ) -> impl Future<Output = Result<(NonZeroU64, SlotHandle)>> + Send + 'a {
+    ) -> impl Future<Output = Result<(SlotHandle, Slot<C>)>> + Send + 'a {
         let host_key = HostKey::new(tag, host_string);
         async move {
             loop {
@@ -350,24 +314,20 @@ impl<C: Connection> Http11ConnectionPool<C> {
                 // Try to acquire an idle connection
                 if let Some(handle) = host_pool.idle_connections.pop_front() {
                     let slot = &self.slots[handle.to_index()];
-                    let lease = Lease::new(host_key);
-                    let lease_id = lease.id;
-                    *slot.state.lock() = SlotState::Leased(lease);
-                    return Ok((lease_id, handle));
+                    let lease = Lease::new(lease_id, host_key);
+                    let old_slot = std::mem::replace(&mut *slot.lock(), Slot::Leased(lease));
+                    return Ok((handle, old_slot));
                 }
 
                 if host_pool.total_connections < host_pool.max_connections {
                     // Try to acquire a free slot
                     if let Some(handle) = self.free_slots.lock().pop_front() {
                         let slot = &self.slots[handle.to_index()];
-                        let lease = Lease::new(host_key);
-                        let lease_id = lease.id;
-                        *slot.state.lock() = SlotState::Leased(lease);
+                        let lease = Lease::new(lease_id, host_key);
+                        let old_slot = std::mem::replace(&mut *slot.lock(), Slot::Leased(lease));
                         host_pool.total_connections += 1;
-                        return Ok((lease_id, handle));
+                        return Ok((handle, old_slot));
                     }
-
-                    // TODO: Stochastically steal an idle slot from another host pool
                 }
 
                 if host_pool.total_connections < host_pool.max_connections
@@ -390,41 +350,30 @@ impl<C: Connection> Http11ConnectionPool<C> {
 
     pub fn connect<'a: 'b, 'b>(
         &'a self,
+        lease_id: NonZeroU64,
         tag: Uuid,
         host_string: &'b str,
     ) -> impl Future<Output = Result<ConnectionHandle<'a, C>>> + Send + 'b {
         async move {
-            let (lease_id, handle) = self.acquire_lease(tag, host_string).await?;
-            let leased_slot = LeasedSlot { pool: self, handle };
+            let (handle, old_slot) = self.acquire_lease(lease_id, tag, host_string).await?;
+            let leased_slot = TmpLeasedSlot(LeasedSlot {
+                id: lease_id,
+                pool: self,
+                handle,
+            });
 
-            let slot = &self.slots[handle.to_index()];
             let keepalive = self.settings.idle_timeout_seconds;
-
-            {
-                let state = slot.state.lock();
-                if state.lease_id() != Some(lease_id) {
-                    return Err(ConnectionPoolError::LeaseExpired.into());
-                }
-            }
-
-            // safety: We hold the lock and the lease; access is exclusive
-            let connection = unsafe { &mut *slot.connection.get() };
-            if connection.is_none() {
-                let inner = self.connection_factory.connect(host_string, keepalive).await?;
-
-                // Double-check the lease in the unlikely event it expired
-                // during .await
-                let state = slot.state.lock();
-                if state.lease_id() != Some(lease_id) {
-                    return Err(ConnectionPoolError::LeaseExpired.into());
-                }
-                *connection = Some(Box::new(inner));
-            }
-            let connection = &mut **connection.as_mut().unwrap() as *mut C;
+            let connection = match old_slot {
+                Slot::Leased(_) => unreachable!(),
+                Slot::IdleSince(_, connection) => connection,
+                Slot::Free => {
+                    Box::new(self.connection_factory.connect(host_string, keepalive).await?)
+                },
+            };
 
             Ok(ConnectionHandle {
-                _slot: leased_slot,
-                connection,
+                slot: leased_slot.into_inner(),
+                connection: ManuallyDrop::new(connection),
             })
         }
     }
@@ -435,24 +384,23 @@ impl<C: Connection> Http11ConnectionPool<C> {
             loop {
                 let Some(&handle) = host.idle_connections.front() else { break };
                 let slot = &self.slots[handle.to_index()];
-                let mut state = slot.state.lock();
+                let mut state = slot.lock();
                 let idle_since = match *state {
-                    SlotState::Leased(_) | SlotState::Free => {
+                    Slot::Leased(_) | Slot::Free => {
                         panic!("non-idle connection in idle pool")
                     },
-                    SlotState::IdleSince(time) => time,
+                    Slot::IdleSince(time, _) => time,
                 };
                 let elapsed = Instant::now().duration_since(idle_since);
                 if elapsed < host.idle_timeout() {
-                    // Stop scanning and go to next host pool
+                    // Because idle connections are ordered from oldest to
+                    // newest, we can stop iterating early
                     break;
                 }
 
-                // Dispose of connection and pop from host pool
-                // safety: We hold the lock and the slot is unleased
-                *state = SlotState::Free;
-                unsafe { slot.dispose_connection() }
+                *state = Slot::Free;
                 host.idle_connections.pop_front();
+                host.total_connections -= 1;
                 drop(state);
 
                 // Push to free pool and notify now that lock is released
@@ -461,32 +409,18 @@ impl<C: Connection> Http11ConnectionPool<C> {
         }
     }
 
-    /// Recycles connections which have expired leases. We assume that any
-    /// connection that is held for longer than the lease duration is a leak.
-    ///
-    /// # Safety
-    ///
-    /// This method is unsafe if any of the connections with expired leases are
-    /// still in use.
-    // TODO: Instead of tracking time, just attach a reference ID and
-    // invalidate by ID. This passes the actual leak detection to the caller.
-    pub unsafe fn recycle_leaks(&self) {
+    // Unused code for hypothetical future leak detection
+    #[allow(dead_code)]
+    pub fn recycle_by_id(&self, lease_id: NonZeroU64) {
         for (index, slot) in self.slots.iter().enumerate() {
-            let mut state = slot.state.lock();
-            if let Some(lease) = state.lease() {
-                if lease.held_duration() < self.lease_expiration() {
-                    continue;
-                }
-            } else {
+            let mut state = slot.lock();
+            if state.lease_id() != Some(lease_id) {
                 continue;
             }
 
-            // Dispose of connection
-            unsafe { slot.dispose_connection() }
-
             // Free the slot
             let host_key = match std::mem::take(&mut *state) {
-                SlotState::Leased(lease) => lease.host_key,
+                Slot::Leased(lease) => lease.host_key,
                 _ => unreachable!(),
             };
             drop(state);
@@ -502,6 +436,7 @@ impl<C: Connection> Http11ConnectionPool<C> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::Duration;
@@ -513,20 +448,29 @@ mod tests {
 
     const TAG: Uuid = uuid!("00000000-0000-0000-0000-000000000000");
 
+    fn random_u64() -> NonZeroU64 {
+        loop {
+            let x: u64 = rand::random();
+            if let Ok(x) = NonZeroU64::try_from(x) {
+                return x;
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_connect() {
         let mut harness = TestHarness::new();
         let pool = harness.connection_pool();
 
         let host = "example.com:1234";
-        let handle = pool.connect(TAG, host).await.unwrap();
+        let handle = pool.connect(random_u64(), TAG, host).await.unwrap();
         assert_eq!(handle.host_string(), host);
         assert_eq!(handle.keep_alive_secs, 60);
         assert_eq!(handle.id, 0);
         drop(handle);
 
         // Connection is reused
-        let handle = pool.connect(TAG, host).await.unwrap();
+        let handle = pool.connect(random_u64(), TAG, host).await.unwrap();
         assert_eq!(handle.id, 0);
     }
 
@@ -536,7 +480,7 @@ mod tests {
         let pool = harness.connection_pool();
 
         let host = "example.com:1234";
-        let handle = pool.connect(TAG, host).await.unwrap();
+        let handle = pool.connect(random_u64(), TAG, host).await.unwrap();
         let num_connections = Arc::clone(&handle.num_connections);
         assert_eq!(handle.id, 0);
         drop(handle);
@@ -554,34 +498,27 @@ mod tests {
         assert_eq!(pool.free_slots.lock().len(), 256); // Slot returned to free pool
         assert_eq!(num_connections.load(Ordering::Relaxed), 0); // Connection async destroyed
 
-        let handle = pool.connect(TAG, host).await.unwrap();
+        let handle = pool.connect(random_u64(), TAG, host).await.unwrap();
         assert_eq!(handle.id, 1);
         assert_eq!(pool.free_slots.lock().len(), 255);
         assert_eq!(num_connections.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn test_expired_lease() {
+    async fn test_recycle_by_id() {
         let mut harness = TestHarness::new();
         let pool = harness.connection_pool();
 
         let host = "example.com:1234";
-        let handle = pool.connect(TAG, host).await.unwrap();
+        let lease_id = NonZeroU64::new(1).unwrap();
+        let handle = pool.connect(lease_id, TAG, host).await.unwrap();
         let num_connections = Arc::clone(&handle.num_connections);
-        // Leak the handle
-        std::mem::forget(handle);
 
-        // Slot is not reclaimed prematurely
-        unsafe { pool.recycle_leaks() };
-        tokio::task::yield_now().await;
-        assert_eq!(pool.free_slots.lock().len(), 255);
-        assert_eq!(num_connections.load(Ordering::Relaxed), 1);
-
-        // Slot is reclaimed, connection destroyed
-        tokio::time::advance(Duration::from_secs(301)).await;
-        unsafe { pool.recycle_leaks() };
+        // Slot is reclaimed
+        pool.recycle_by_id(lease_id);
         tokio::task::yield_now().await;
         assert_eq!(pool.free_slots.lock().len(), 256);
+        drop(handle);
         assert_eq!(num_connections.load(Ordering::Relaxed), 0);
     }
 
@@ -596,13 +533,13 @@ mod tests {
         ));
 
         // We can allocate one handle for each host
-        let handle1 = pool.connect(TAG, "example.com:1234").await.unwrap();
-        let _handle2 = pool.connect(TAG, "example.com:4321").await.unwrap();
+        let handle1 = pool.connect(random_u64(), TAG, "example.com:1234").await.unwrap();
+        let _handle2 = pool.connect(random_u64(), TAG, "example.com:4321").await.unwrap();
 
         let (send, recv) = std::sync::mpsc::channel::<()>();
         let pool2 = Arc::clone(&pool);
         tokio::spawn(async move {
-            pool2.connect(TAG, "example.com:1234").await.unwrap();
+            pool2.connect(random_u64(), TAG, "example.com:1234").await.unwrap();
             send.send(()).unwrap();
         });
 
@@ -626,12 +563,12 @@ mod tests {
             Box::new(TestConnectionFactory::default()),
         ));
 
-        let handle = pool.connect(TAG, "example.com:1234").await.unwrap();
+        let handle = pool.connect(random_u64(), TAG, "example.com:1234").await.unwrap();
 
         let (send, recv) = std::sync::mpsc::channel::<()>();
         let pool2 = Arc::clone(&pool);
         tokio::spawn(async move {
-            pool2.connect(TAG, "example.com:4321").await.unwrap();
+            pool2.connect(random_u64(), TAG, "example.com:4321").await.unwrap();
             send.send(()).unwrap();
         });
 
@@ -661,12 +598,12 @@ mod tests {
             Box::new(TestConnectionFactory::default()),
         ));
 
-        let handle = pool.connect(TAG, "example.com:1234").await.unwrap();
+        let handle = pool.connect(random_u64(), TAG, "example.com:1234").await.unwrap();
 
         let (send, recv) = std::sync::mpsc::channel::<()>();
         let pool2 = Arc::clone(&pool);
         tokio::spawn(async move {
-            pool2.connect(TAG, "example.com:1234").await.unwrap();
+            pool2.connect(random_u64(), TAG, "example.com:1234").await.unwrap();
             send.send(()).unwrap();
         });
 
@@ -692,7 +629,7 @@ mod tests {
         ));
 
         let tag_2 = uuid!("00000000-0000-0000-0000-000000000001");
-        let _handle1 = pool.connect(TAG, "example.com:1234").await.unwrap();
-        let _handle2 = pool.connect(tag_2, "example.com:1234").await.unwrap();
+        let _handle1 = pool.connect(random_u64(), TAG, "example.com:1234").await.unwrap();
+        let _handle2 = pool.connect(random_u64(), tag_2, "example.com:1234").await.unwrap();
     }
 }

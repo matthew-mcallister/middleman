@@ -86,6 +86,7 @@ impl Version {
             Self::V1 => &[
                 ColumnFamilyName::Meta,
                 ColumnFamilyName::Deliveries,
+                ColumnFamilyName::DeliveryNextAttemptIndex,
                 ColumnFamilyName::Subscribers,
                 ColumnFamilyName::Events,
                 ColumnFamilyName::EventTagIdempotencyKeyIndex,

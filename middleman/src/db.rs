@@ -6,6 +6,7 @@ use strum_macros::{IntoStaticStr, VariantNames};
 pub(crate) enum ColumnFamilyName {
     Meta,
     Deliveries,
+    DeliveryNextAttemptIndex,
     Events,
     EventTagIdempotencyKeyIndex,
     EventTagStreamIndex,

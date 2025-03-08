@@ -6,8 +6,6 @@ use hyper::StatusCode;
 use middleman_db as db;
 use serde_derive::{Deserialize, Serialize};
 
-use crate::connection::ConnectionPoolError;
-
 /// General-purpose error type
 #[derive(Debug)]
 pub struct Error {
@@ -113,15 +111,6 @@ impl From<Box<db::Error>> for Box<Error> {
         Box::new(Error {
             kind,
             cause: Some(value.into()),
-        })
-    }
-}
-
-impl From<ConnectionPoolError> for Box<Error> {
-    fn from(value: ConnectionPoolError) -> Self {
-        Box::new(Error {
-            kind: ErrorKind::Busy,
-            cause: Some(Box::new(value)),
         })
     }
 }

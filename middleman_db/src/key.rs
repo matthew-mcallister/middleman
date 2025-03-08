@@ -99,6 +99,9 @@ macro_rules! big_endian_int {
 big_endian_int!(BigEndianU16, u16);
 big_endian_int!(BigEndianU32, u32);
 big_endian_int!(BigEndianU64, u64);
+big_endian_int!(BigEndianI16, i16);
+big_endian_int!(BigEndianI32, i32);
+big_endian_int!(BigEndianI64, i64);
 
 macro_rules! impl_packed_tuple {
     ($PackedN:ident, $($T:ident),*$(,)?) => {
