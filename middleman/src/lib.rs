@@ -7,6 +7,7 @@ pub mod delivery;
 pub mod error;
 pub mod event;
 mod migration;
+mod scheduler;
 pub mod subscriber;
 #[cfg(test)]
 mod testing;

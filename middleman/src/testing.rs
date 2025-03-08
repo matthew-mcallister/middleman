@@ -9,7 +9,7 @@ use std::sync::Arc;
 use compact_str::CompactString;
 
 use crate::config::Config;
-use crate::connection::{Connection, ConnectionFactory, Http11ConnectionPool};
+use crate::connection::{Connection, ConnectionFactory, Http11ConnectionPool, Key};
 use crate::error::Result;
 use crate::Application;
 
@@ -17,7 +17,7 @@ use crate::Application;
 pub struct TestHarness {
     db_dir: Option<tempfile::TempDir>,
     application: Option<Application>,
-    connection_pool: Option<Http11ConnectionPool<TestConnection>>,
+    connection_pool: Option<Http11ConnectionPool<CompactString, TestConnection>>,
 }
 
 impl TestHarness {
@@ -59,7 +59,7 @@ impl TestHarness {
         self.application.as_mut().unwrap()
     }
 
-    pub fn connection_pool(&mut self) -> &mut Http11ConnectionPool<TestConnection> {
+    pub fn connection_pool(&mut self) -> &mut Http11ConnectionPool<CompactString, TestConnection> {
         if self.connection_pool.is_some() {
             return self.connection_pool.as_mut().unwrap();
         }
@@ -100,20 +100,22 @@ impl Drop for TestConnection {
     }
 }
 
+impl Key for CompactString {}
 impl Connection for TestConnection {}
 
 impl ConnectionFactory for TestConnectionFactory {
+    type Key = CompactString;
     type Connection = TestConnection;
 
     fn connect(
         &self,
-        host_string: &str,
+        key: &Self::Key,
         keep_alive_secs: u16,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send>> {
         let num_connections = Arc::clone(&self.num_connections);
         num_connections.fetch_add(1, Ordering::Relaxed);
         let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let host = host_string.into();
+        let host = key.clone();
         Box::pin(async move {
             Ok(TestConnection {
                 num_connections,
