@@ -15,8 +15,10 @@ pub struct Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorKind {
+    InvalidInput,
     Busy,
     Unexpected,
+    NetworkError,
 }
 
 pub type Result<T> = std::result::Result<T, Box<Error>>;
@@ -24,9 +26,12 @@ pub type Result<T> = std::result::Result<T, Box<Error>>;
 impl ErrorKind {
     fn status_code(&self) -> StatusCode {
         unsafe {
-            std::mem::transmute(match self {
-                Self::Busy => 409u16,
+            std::mem::transmute::<u16, _>(match self {
+                Self::InvalidInput => 400,
+                Self::Busy => 409,
                 Self::Unexpected => 500,
+                // Not sure if 502 makes the most sense here
+                Self::NetworkError => 502,
             })
         }
     }
@@ -35,8 +40,10 @@ impl ErrorKind {
 impl std::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidInput => write!(f, "invalid input"),
             Self::Busy => write!(f, "busy, try again"),
             Self::Unexpected => write!(f, "internal error"),
+            Self::NetworkError => write!(f, "network request failed"),
         }
     }
 }
@@ -49,15 +56,29 @@ impl Error {
     pub(crate) fn cause(&self) -> Option<&(dyn StdError + Send + Sync + 'static)> {
         self.cause.as_ref().map(|x| &**x)
     }
+
+    pub(crate) fn from_kind(kind: ErrorKind) -> Self {
+        Self { kind, cause: None }
+    }
+
+    pub(crate) fn with_cause(
+        kind: ErrorKind,
+        string: impl Into<Box<dyn StdError + Send + Sync + 'static>>,
+    ) -> Self {
+        Self {
+            kind,
+            cause: Some(string.into().into()),
+        }
+    }
 }
 
-macro_rules! unexpected_errors {
-    ($($ty:ty),*$(,)?) => {
+macro_rules! define_errors {
+    ($($ty:ty => $kind:expr),*$(,)?) => {
         $(
             impl From<$ty> for Box<Error> {
                 fn from(value: $ty) -> Self {
                     Box::new(Error {
-                        kind: ErrorKind::Unexpected,
+                        kind: $kind,
                         cause: Some(value.into()),
                     })
                 }
@@ -66,13 +87,16 @@ macro_rules! unexpected_errors {
     };
 }
 
-unexpected_errors!(
-    String,
-    std::io::Error,
-    std::net::AddrParseError,
-    std::num::ParseIntError,
-    std::env::VarError,
-);
+define_errors! {
+    String => ErrorKind::Unexpected,
+    std::io::Error => ErrorKind::Unexpected,
+    std::net::AddrParseError => ErrorKind::InvalidInput,
+    std::num::ParseIntError => ErrorKind::InvalidInput,
+    std::env::VarError => ErrorKind::InvalidInput,
+    tokio_native_tls::native_tls::Error => ErrorKind::NetworkError,
+    hyper::Error => ErrorKind::NetworkError,
+    hyper_util::client::legacy::connect::dns::InvalidNameError => ErrorKind::InvalidInput,
+}
 
 impl<'a> From<&'a str> for Box<Error> {
     fn from(value: &'a str) -> Self {
@@ -95,10 +119,7 @@ impl std::fmt::Display for Error {
 
 impl From<ErrorKind> for Box<Error> {
     fn from(value: ErrorKind) -> Self {
-        Box::new(Error {
-            kind: value,
-            cause: None,
-        })
+        Box::new(Error::from_kind(value))
     }
 }
 

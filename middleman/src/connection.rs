@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
 use std::mem::ManuallyDrop;
@@ -11,13 +12,16 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::time::Instant;
+use uuid::Uuid;
 
 use crate::error::Result;
 
-pub trait Key: Clone + Eq + Hash + Send + Sync + 'static {}
-pub trait Connection: Send + Sync + 'static {}
+pub trait Key: Clone + Eq + Hash + Debug + Send + Sync + 'static {}
+pub trait Connection: Debug + Send + Sync + 'static {}
 
-pub trait ConnectionFactory {
+impl Key for Uuid {}
+
+pub trait ConnectionFactory: Debug {
     type Key: Key;
     type Connection: Connection;
 
@@ -83,6 +87,7 @@ impl<K> Lease<K> {
 /// is not released before it expires, it is assumed that the owning task is
 /// dead and the connection is invalid, and the slot will be recycled to the
 /// free pool.
+#[derive(Debug)]
 enum Slot<K, C> {
     Leased(Lease<K>),
     IdleSince(Instant, Box<C>),
@@ -134,6 +139,7 @@ impl PerHostPool {
 }
 
 // Provides the destructor for ConnectionHandle
+#[derive(Debug)]
 struct LeasedSlot<'pool, K: Key, C: Connection> {
     id: NonZeroU64,
     pool: &'pool Http11ConnectionPool<K, C>,
@@ -169,6 +175,7 @@ impl<'pool, K: Key, C: Connection> LeasedSlot<'pool, K, C> {
     }
 }
 
+#[derive(Debug)]
 #[repr(transparent)]
 struct TmpLeasedSlot<'pool, K: Key, C: Connection>(LeasedSlot<'pool, K, C>);
 
@@ -186,6 +193,7 @@ impl<'pool, K: Key, C: Connection> TmpLeasedSlot<'pool, K, C> {
 }
 
 /// Exclusive handle to a connection within the pool.
+#[derive(Debug)]
 pub struct ConnectionHandle<'pool, K: Key, C: Connection> {
     slot: LeasedSlot<'pool, K, C>,
     connection: ManuallyDrop<Box<C>>,
@@ -214,9 +222,9 @@ impl<'pool, K: Key, C: Connection> Drop for ConnectionHandle<'pool, K, C> {
 
 #[derive(Clone, Debug)]
 pub struct Http11ConnectionPoolSettings {
-    max_connections: u16,
-    max_connections_per_host: u16,
-    idle_timeout_seconds: u16,
+    pub(crate) max_connections: u16,
+    pub(crate) max_connections_per_host: u16,
+    pub(crate) idle_timeout_seconds: u16,
 }
 
 impl Default for Http11ConnectionPoolSettings {
@@ -232,7 +240,8 @@ impl Default for Http11ConnectionPoolSettings {
 /// Connection pool for subscribers. Assumes a one-connection-per-request rule
 /// for compatibility with HTTP/1.1. Supports global and per-host connection
 /// limits.
-pub struct Http11ConnectionPool<K, C: Connection> {
+#[derive(Debug)]
+pub struct Http11ConnectionPool<K: Key, C: Connection> {
     settings: Http11ConnectionPoolSettings,
     connection_factory: Box<dyn ConnectionFactory<Key = K, Connection = C>>,
     slots: Box<[Mutex<Slot<K, C>>]>,
@@ -242,8 +251,8 @@ pub struct Http11ConnectionPool<K, C: Connection> {
     free_slots: Mutex<VecDeque<SlotHandle>>,
 }
 
-unsafe impl<K: Send, C: Connection> Send for Http11ConnectionPool<K, C> {}
-unsafe impl<K: Sync, C: Connection> Sync for Http11ConnectionPool<K, C> {}
+unsafe impl<K: Key, C: Connection> Send for Http11ConnectionPool<K, C> {}
+unsafe impl<K: Key, C: Connection> Sync for Http11ConnectionPool<K, C> {}
 
 impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
     pub fn new(

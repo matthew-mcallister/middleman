@@ -10,6 +10,7 @@ use crate::event::{Event, EventBuilder, EventTable};
 use crate::migration::Migrator;
 use crate::subscriber::SubscriberTable;
 
+#[derive(Debug)]
 pub struct Application {
     pub(crate) config: Box<Config>,
     pub(crate) db: Arc<Db>,

@@ -68,6 +68,7 @@ pub struct Delivery {
 
 unsafe impl AsBytes for Delivery {}
 
+#[derive(Debug)]
 pub struct DeliveryTable {
     cf: ColumnFamily,
     next_attempt_index: ColumnFamily,

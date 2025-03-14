@@ -31,6 +31,7 @@ big_tuple_struct! {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct SubscriberTable {
     cf: ColumnFamily,
 }

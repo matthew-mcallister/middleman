@@ -31,6 +31,7 @@ big_tuple_struct! {
     pub struct Event {
         header[0]: EventHeader,
         pub stream[1]: str,
+        // XXX: Make this BSON
         pub payload[2]: [u8],
     }
 }
@@ -41,7 +42,7 @@ impl Event {
     }
 
     pub fn content_type(&self) -> ContentType {
-        // TODO: Read content type from flags
+        // XXX: I have no plans for how to support any content type except JSON
         ContentType::Json
     }
 
@@ -72,7 +73,6 @@ impl Serialize for Event {
         state.serialize_field("idempotency_key", &self.idempotency_key())?;
         state.serialize_field("tag", &self.tag())?;
         state.serialize_field("stream", self.stream())?;
-        // XXX: Maybe omit this if it's already the default (application/json)?
         state.serialize_field("content_type", &self.content_type())?;
         match self.content_type() {
             ContentType::Json => {
@@ -136,6 +136,7 @@ impl<'a> EventBuilder<'a> {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct EventTable {
     id_sequence: db::Sequence,
     cf: ColumnFamily,
