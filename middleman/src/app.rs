@@ -4,9 +4,11 @@ use db::{Db, Transaction};
 use middleman_db as db;
 
 use crate::config::Config;
+use crate::connection::Http11ConnectionPoolSettings;
 use crate::delivery::DeliveryTable;
 use crate::error::Result;
 use crate::event::{Event, EventBuilder, EventTable};
+use crate::http::{SubscriberConnectionFactory, SubscriberConnectionPool};
 use crate::migration::Migrator;
 use crate::subscriber::SubscriberTable;
 
@@ -16,7 +18,8 @@ pub struct Application {
     pub(crate) db: Arc<Db>,
     pub(crate) events: EventTable,
     pub(crate) deliveries: DeliveryTable,
-    pub(crate) subscribers: SubscriberTable,
+    pub(crate) subscribers: Arc<SubscriberTable>,
+    pub(crate) connections: Arc<SubscriberConnectionPool>,
 }
 
 impl Application {
@@ -27,7 +30,16 @@ impl Application {
 
         let events = EventTable::new(Arc::clone(&db))?;
         let deliveries = DeliveryTable::new(Arc::clone(&db))?;
-        let subscribers = SubscriberTable::new(Arc::clone(&db))?;
+        let subscribers = Arc::new(SubscriberTable::new(Arc::clone(&db))?);
+
+        let settings = Http11ConnectionPoolSettings {
+            max_connections: 512,
+            max_connections_per_host: 16,
+            idle_timeout_seconds: 30,
+        };
+        let connection_factory =
+            Box::new(SubscriberConnectionFactory::new(Arc::clone(&subscribers))?);
+        let connections = Arc::new(SubscriberConnectionPool::new(settings, connection_factory));
 
         Ok(Self {
             config,
@@ -35,6 +47,7 @@ impl Application {
             events,
             deliveries,
             subscribers,
+            connections,
         })
     }
 
@@ -87,7 +100,7 @@ mod tests {
             .content_type(ContentType::Json)
             .tag(tag)
             .stream("asdf")
-            .payload(b"1234321")
+            .payload("1234321")
             .idempotency_key(idempotency_key);
         let event = app.create_event(builder.clone()).unwrap();
 
@@ -114,6 +127,7 @@ mod tests {
             .id(subscriber1_id)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new("^asdf:").unwrap())
+            .hmac_key("key".to_owned())
             .build()
             .unwrap();
         app.subscribers.create(&mut txn, &subscriber1).unwrap();
@@ -123,6 +137,7 @@ mod tests {
             .id(subscriber2_id)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new("^asdf:1234$").unwrap())
+            .hmac_key("key".to_owned())
             .build()
             .unwrap();
         app.subscribers.create(&mut txn, &subscriber2).unwrap();
@@ -135,7 +150,7 @@ mod tests {
             .content_type(ContentType::Json)
             .tag(tag)
             .stream("asdf:1234")
-            .payload(b"1234321")
+            .payload("1234321")
             .idempotency_key(idempotency_key);
         let event = app.create_event(event).unwrap();
 

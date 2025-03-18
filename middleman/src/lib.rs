@@ -8,6 +8,7 @@ pub mod error;
 pub mod event;
 mod http;
 mod migration;
+mod scheduler;
 pub mod subscriber;
 #[cfg(test)]
 mod testing;

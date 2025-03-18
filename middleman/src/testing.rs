@@ -107,11 +107,11 @@ impl ConnectionFactory for TestConnectionFactory {
     type Key = CompactString;
     type Connection = TestConnection;
 
-    fn connect(
-        &self,
-        key: &Self::Key,
+    fn connect<'a>(
+        &'a self,
+        key: &'a Self::Key,
         keep_alive_secs: u16,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send + 'a>> {
         let num_connections = Arc::clone(&self.num_connections);
         num_connections.fetch_add(1, Ordering::Relaxed);
         let id = self.id.fetch_add(1, Ordering::Relaxed);

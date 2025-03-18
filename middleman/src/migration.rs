@@ -88,6 +88,7 @@ impl Version {
                 ColumnFamilyName::Deliveries,
                 ColumnFamilyName::DeliveryNextAttemptIndex,
                 ColumnFamilyName::Subscribers,
+                ColumnFamilyName::SubscriberTagIndex,
                 ColumnFamilyName::Events,
                 ColumnFamilyName::EventTagIdempotencyKeyIndex,
                 ColumnFamilyName::EventTagStreamIndex,

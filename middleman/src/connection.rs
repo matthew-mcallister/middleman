@@ -5,7 +5,6 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
 use std::mem::ManuallyDrop;
-use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -27,11 +26,11 @@ pub trait ConnectionFactory: Debug {
     type Key: Key;
     type Connection: Connection;
 
-    fn connect(
-        &self,
-        key: &Self::Key,
+    fn connect<'a>(
+        &'a self,
+        key: &'a Self::Key,
         keep_alive_secs: u16,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send + 'a>>;
 }
 
 #[derive(Debug)]
@@ -269,7 +268,6 @@ impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::Duration;

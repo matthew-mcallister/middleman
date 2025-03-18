@@ -7,9 +7,9 @@ use db::model::big_tuple_struct;
 use db::{Accessor, ColumnFamily, Cursor, Db, Transaction};
 use middleman_db::{self as db, ColumnFamilyDescriptor, Sequence};
 use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
-use serde::Serialize;
 use uuid::Uuid;
 
+use crate::api::to_json::WriteJson;
 use crate::db::ColumnFamilyName;
 use crate::error::Result;
 use crate::types::ContentType;
@@ -31,19 +31,14 @@ big_tuple_struct! {
     pub struct Event {
         header[0]: EventHeader,
         pub stream[1]: str,
-        // XXX: Make this BSON
-        pub payload[2]: [u8],
+        // XXX: Make this BSON?
+        pub payload[2]: str,
     }
 }
 
 impl Event {
     pub fn id(&self) -> u64 {
         self.header().id
-    }
-
-    pub fn content_type(&self) -> ContentType {
-        // XXX: I have no plans for how to support any content type except JSON
-        ContentType::Json
     }
 
     pub fn idempotency_key(&self) -> Uuid {
@@ -53,33 +48,29 @@ impl Event {
     pub fn tag(&self) -> Uuid {
         self.header().tag
     }
-
-    pub fn payload_string(&self) -> &str {
-        match self.content_type() {
-            ContentType::Json => std::str::from_utf8(self.payload()).unwrap(),
-            // Should be base64 encoded if the payload is binary
-        }
-    }
 }
 
-impl Serialize for Event {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Event", 4)?;
-        state.serialize_field("id", &self.id())?;
-        state.serialize_field("idempotency_key", &self.idempotency_key())?;
-        state.serialize_field("tag", &self.tag())?;
-        state.serialize_field("stream", self.stream())?;
-        state.serialize_field("content_type", &self.content_type())?;
-        match self.content_type() {
-            ContentType::Json => {
-                state.serialize_field("payload", self.payload_string())?;
-            },
-        }
-        state.end()
+impl WriteJson for Event {
+    fn write_json(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // We use raw string formatting so we can embed the payload directly
+        // into the JSON document.
+        write!(
+            f,
+            concat!(
+                "{{",
+                "\"id\":{id}",
+                ",\"idempotency_key\":\"{idempotency_key}\"",
+                ",\"tag\":\"{tag}\"",
+                ",\"stream\":\"{stream}\"",
+                ",\"payload\":{payload}",
+                "}}",
+            ),
+            id = self.id(),
+            idempotency_key = self.idempotency_key(),
+            tag = self.tag(),
+            stream = self.stream(),
+            payload = self.payload(),
+        )
     }
 }
 
@@ -89,7 +80,7 @@ pub struct EventBuilder<'a> {
     tag: Option<Uuid>,
     content_type: Option<ContentType>,
     stream: Option<&'a str>,
-    payload: Option<&'a [u8]>,
+    payload: Option<&'a str>,
 }
 
 impl<'a> EventBuilder<'a> {
@@ -117,7 +108,7 @@ impl<'a> EventBuilder<'a> {
         self
     }
 
-    pub fn payload(&mut self, payload: &'a [u8]) -> &mut Self {
+    pub fn payload(&mut self, payload: &'a str) -> &mut Self {
         self.payload = Some(payload);
         self
     }
@@ -295,7 +286,7 @@ mod tests {
         let stream = "my_stream";
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000001");
-        let payload = b"1234ideclareathumbwar";
+        let payload = "1234ideclareathumbwar";
         let event = EventBuilder::new()
             .content_type(ContentType::Json)
             .idempotency_key(idempotency_key)
@@ -303,7 +294,6 @@ mod tests {
             .tag(tag)
             .payload(payload)
             .build(0);
-        assert_eq!(event.content_type(), ContentType::Json);
         assert_eq!(event.stream(), stream);
         assert_eq!(event.tag(), tag);
         assert_eq!(event.idempotency_key(), idempotency_key);
@@ -316,7 +306,7 @@ mod tests {
             .content_type(ContentType::Json)
             .tag(uuid::uuid!("00000000-0000-8000-8000-000000000000"))
             .stream("asdf")
-            .payload(b"1234321")
+            .payload("1234321")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"));
         builder
     }
@@ -377,25 +367,25 @@ mod tests {
         let mut event1 = base.clone();
         event1
             .stream("stream1")
-            .payload(b"1")
+            .payload("1")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000001"));
         let event1 = events.create(&mut txn, event1).unwrap();
         let mut event2 = base.clone();
         event2
             .stream("stream0")
-            .payload(b"2")
+            .payload("2")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000002"));
         let _event2 = events.create(&mut txn, event2).unwrap();
         let mut event3 = base.clone();
         event3
             .stream("stream1")
-            .payload(b"3")
+            .payload("3")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000003"));
         let event3 = events.create(&mut txn, event3).unwrap();
         let mut event4 = base.clone();
         event4
             .stream("strm2")
-            .payload(b"4")
+            .payload("4")
             .idempotency_key(uuid::uuid!("00000000-0000-8000-8000-000000000004"));
         let _event4 = events.create(&mut txn, event4).unwrap();
         txn.commit().unwrap();

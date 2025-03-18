@@ -7,10 +7,13 @@ use hyper::StatusCode;
 use serde_derive::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use self::to_json::ToJson;
 use crate::error::Result;
 use crate::event::EventBuilder;
 use crate::types::ContentType;
 use crate::Application;
+
+pub(crate) mod to_json;
 
 #[derive(Serialize, Deserialize)]
 struct PutEvent {
@@ -37,7 +40,7 @@ impl<'a> From<&'a PutEvent> for EventBuilder<'a> {
             .tag(value.tag)
             .content_type(value.content_type)
             .stream(&value.stream)
-            .payload(value.payload.as_bytes());
+            .payload(&value.payload);
         builder
     }
 }
@@ -67,7 +70,7 @@ pub fn router(app: Arc<Application>) -> Router {
                     app.events.iter_by_tag(query.tag, starting_id).take(max_results as _).collect()
                 };
                 let events = events?;
-                Ok(Json(events))
+                Ok(ToJson(events))
             }
         }),
     )
