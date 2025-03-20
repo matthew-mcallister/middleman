@@ -4,13 +4,20 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use http::Request;
+use middleman_db::bytes::AsBytes;
+use middleman_db::{packed, Db, Transaction};
 use uuid::Uuid;
 
 use crate::api::to_json::ToJson;
-use crate::error::{Error, ErrorKind};
-use crate::event::Event;
+use crate::delivery::{Delivery, DeliveryTable};
+use crate::error::{Error, ErrorKind, Result};
+use crate::event::{Event, EventTable};
 use crate::http::{timestamp_and_sign_request, SubscriberConnectionPool};
-use crate::subscriber::SubscriberTable;
+use crate::subscriber::{Subscriber, SubscriberTable};
+
+fn between(x: u16, min: u16, max: u16) -> bool {
+    x >= min && x < max
+}
 
 #[derive(Clone, Copy, Debug)]
 struct RingBuffer<T, const N: usize> {
@@ -52,22 +59,82 @@ impl<T, const N: usize> RingBuffer<T, N> {
 }
 
 #[derive(Debug)]
+struct TaskShared {
+    db: Arc<Db>,
+    subscriber_id: Uuid,
+    stats: Stats,
+    subscribers: Arc<SubscriberTable>,
+    events: Arc<EventTable>,
+    deliveries: Arc<DeliveryTable>,
+    connections: Arc<SubscriberConnectionPool>,
+}
+
+struct Task {
+    shared: Arc<TaskShared>,
+    transaction: Transaction,
+    subscriber: Box<Subscriber>,
+    delivery: Delivery,
+    event: Box<Event>,
+}
+
+impl Task {
+    fn new(shared: Arc<TaskShared>, subscriber_id: Uuid, event_id: u64) -> Result<Self> {
+        let mut transaction = shared.db.clone().begin_transaction();
+        let key = packed!(subscriber_id, event_id);
+        transaction.lock_key(&shared.deliveries.cf, AsBytes::as_bytes(&key))?;
+        let subscriber = shared.subscribers.get(subscriber_id)?.ok_or(ErrorKind::Unexpected)?;
+        let event = shared.events.get(subscriber.tag(), event_id)?.ok_or(ErrorKind::Unexpected)?;
+        let delivery =
+            shared.deliveries.get(subscriber_id, event_id)?.ok_or(ErrorKind::Unexpected)?;
+        Ok(Self {
+            shared,
+            transaction,
+            subscriber,
+            delivery,
+            event,
+        })
+    }
+
+    async fn run(mut self) -> Result<()> {
+        let subscriber_id = self.delivery.subscriber_id();
+        let mut txn = self.transaction;
+
+        let body = ToJson(&self.event).to_string();
+        let mut request = Request::new(body);
+        let timestamp: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
+        timestamp_and_sign_request(timestamp.into(), self.subscriber.hmac_key(), &mut request);
+
+        let result = self.shared.connections.connect(&subscriber_id).await;
+        // Mark the task as started whether or not the connection succeeded
+        self.shared.stats.tasks_started_last_tick.fetch_add(1, Ordering::Acquire);
+        let mut connection = result?;
+
+        let response = connection.send_request(request).await;
+        match response {
+            Ok(response) if between(u16::from(response.status()), 200, 300) => {
+                self.shared.deliveries.delete(&mut txn, &mut self.delivery);
+            },
+            // TODO: Handle 300
+            Err(_) | Ok(_) => {
+                self.shared.deliveries.update_for_next_attempt(&mut txn, &mut self.delivery);
+            },
+        }
+
+        txn.commit()?;
+
+        Ok::<(), Box<Error>>(())
+    }
+}
+
+#[derive(Debug)]
 struct Stats {
     queued_tasks: AtomicU32,
     tasks_started_last_tick: AtomicU32,
 }
 
 #[derive(Debug)]
-struct UnitSchedulerShared {
-    subscriber_id: Uuid,
-    stats: Stats,
-    subscribers: Arc<SubscriberTable>,
-    connections: Arc<SubscriberConnectionPool>,
-}
-
-#[derive(Debug)]
 pub(crate) struct UnitScheduler {
-    shared: Arc<UnitSchedulerShared>,
+    shared: Arc<TaskShared>,
     tasks_started_history: RingBuffer<u32, 3>,
 }
 
@@ -112,25 +179,12 @@ impl UnitScheduler {
         num
     }
 
-    fn spawn_task<'st>(&self, subscriber_id: Uuid, event: Box<Event>) {
+    fn spawn_task<'st>(&self, subscriber_id: Uuid, event_id: u64) -> Result<()> {
         let shared = Arc::clone(&self.shared);
         shared.stats.queued_tasks.fetch_add(1, Ordering::Acquire);
-        tokio::spawn(async move {
-            let subscriber = shared.subscribers.get(subscriber_id)?.ok_or(ErrorKind::Unexpected)?;
 
-            let body = ToJson(&event).to_string();
-            let mut request = Request::new(body);
-            let timestamp: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
-            timestamp_and_sign_request(timestamp.into(), subscriber.hmac_key(), &mut request);
-
-            let result = shared.connections.connect(&subscriber_id).await;
-            // Mark the task as started whether or not the connection succeeded
-            shared.stats.tasks_started_last_tick.fetch_add(1, Ordering::Acquire);
-            let mut connection = result?;
-
-            todo!();
-
-            Ok::<(), Box<Error>>(())
-        });
+        let task = Task::new(shared, subscriber_id, event_id)?;
+        tokio::spawn(task.run());
+        Ok(())
     }
 }

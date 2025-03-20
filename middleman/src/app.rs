@@ -16,8 +16,8 @@ use crate::subscriber::SubscriberTable;
 pub struct Application {
     pub(crate) config: Box<Config>,
     pub(crate) db: Arc<Db>,
-    pub(crate) events: EventTable,
-    pub(crate) deliveries: DeliveryTable,
+    pub(crate) events: Arc<EventTable>,
+    pub(crate) deliveries: Arc<DeliveryTable>,
     pub(crate) subscribers: Arc<SubscriberTable>,
     pub(crate) connections: Arc<SubscriberConnectionPool>,
 }
@@ -28,8 +28,8 @@ impl Application {
         migrator.migrate()?;
         let db = Arc::new(migrator.unwrap());
 
-        let events = EventTable::new(Arc::clone(&db))?;
-        let deliveries = DeliveryTable::new(Arc::clone(&db))?;
+        let events = Arc::new(EventTable::new(Arc::clone(&db))?);
+        let deliveries = Arc::new(DeliveryTable::new(Arc::clone(&db))?);
         let subscribers = Arc::new(SubscriberTable::new(Arc::clone(&db))?);
 
         let settings = Http11ConnectionPoolSettings {
@@ -54,7 +54,7 @@ impl Application {
     pub fn create_event(&self, builder: EventBuilder<'_>) -> Result<Box<Event>> {
         let mut opts = rocksdb::OptimisticTransactionOptions::new();
         opts.set_snapshot(true);
-        let mut txn = Transaction::new(&self.db);
+        let mut txn = Transaction::new(Arc::clone(&self.db));
         let event = self.events.create(&mut txn, builder)?;
         self.create_deliveries_for_event(&mut txn, event.id(), &event)?;
         txn.commit()?;
@@ -77,9 +77,11 @@ impl Application {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use byteview::ByteView;
     use db::Transaction;
-    use middleman_db as db;
+    use middleman_db::{self as db, DbOptions};
     use regex::Regex;
     use url::Url;
 
@@ -119,7 +121,7 @@ mod tests {
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
 
         // Create two subscribers
-        let mut txn = Transaction::new(&app.db);
+        let mut txn = Transaction::new(Arc::clone(&app.db));
         let url = "https://example.com/webhook";
         let subscriber1_id = uuid::uuid!("12120000-0000-8000-8000-000000000001");
         let subscriber1 = SubscriberBuilder::new()
@@ -165,14 +167,21 @@ mod tests {
     #[test]
     fn test_transaction_lock() {
         let mut harness = TestHarness::new();
-        let app = harness.application();
+
+        let descs: [(&str, &rocksdb::Options, rocksdb::ColumnFamilyTtl); 0] = [];
+        let mut options = DbOptions::default();
+        options.create_if_missing = true;
+        let mut db = middleman_db::Db::open(harness.db_dir(), &options, descs).unwrap();
+        db.create_column_family(&("cf", &Default::default(), Default::default())).unwrap();
+        let db = Arc::new(db);
+        let cf = db.get_column_family("cf").unwrap();
 
         let key: ByteView = [1u8, 2, 3, 4].into();
-        let mut txn1 = Transaction::new(&app.db);
-        txn1.lock_key(key.clone()).unwrap();
-        let mut txn2 = Transaction::new(&app.db);
+        let mut txn1 = Transaction::new(Arc::clone(&db));
+        txn1.lock_key(&cf, key.clone()).unwrap();
+        let mut txn2 = Transaction::new(Arc::clone(&db));
         assert_eq!(
-            txn2.lock_key(key).unwrap_err().kind(),
+            txn2.lock_key(&cf, key).unwrap_err().kind(),
             db::ErrorKind::TransactionConflict
         );
     }

@@ -5,12 +5,25 @@ use db::bytes::AsBytes;
 use db::key::Packed2;
 use db::{Accessor, ColumnFamily, ColumnFamilyDescriptor, Db, Transaction};
 use middleman_db::key::{BigEndianU32, BigEndianU64};
-use middleman_db::{self as db, Cursor};
+use middleman_db::{self as db, packed, Cursor};
 use middleman_macros::db_key;
+use rand::Rng;
 use uuid::Uuid;
 
 use crate::db::ColumnFamilyName;
 use crate::error::Result;
+
+const MAX_ATTEMPTS: u32 = 12;
+
+/// Returns a random duration to wait before the next attempt, with
+/// exponential backoff.
+fn next_attempt_delay(last_attempt: u32) -> chrono::TimeDelta {
+    let window = 2f32.powi(last_attempt as _);
+    let x: f32 = rand::rng().random();
+    let delay = window * x + 1.0;
+    let (secs, nanos) = (delay.floor(), (delay.fract() * 1e9).round());
+    chrono::TimeDelta::new(secs as i64, nanos as u32).unwrap()
+}
 
 // UTC datetime with stable binary representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,7 +83,7 @@ unsafe impl AsBytes for Delivery {}
 
 #[derive(Debug)]
 pub struct DeliveryTable {
-    cf: ColumnFamily,
+    pub(crate) cf: ColumnFamily,
     next_attempt_index: ColumnFamily,
 }
 
@@ -83,18 +96,6 @@ pub(crate) struct NextAttemptKey {
     seconds: BigEndianU32,
     nanos: BigEndianU32,
     event_id: BigEndianU64,
-}
-
-impl NextAttemptKey {
-    fn new(date_time: DateTime, event_id: u64, subscriber_id: Uuid) -> Self {
-        Self {
-            yof: date_time.yof.into(),
-            seconds: date_time.seconds.into(),
-            nanos: date_time.nanos.into(),
-            event_id: event_id.into(),
-            subscriber_id: subscriber_id.into(),
-        }
-    }
 }
 
 impl DeliveryTable {
@@ -118,7 +119,7 @@ impl DeliveryTable {
 
     pub(crate) fn create(
         &self,
-        txn: &mut Transaction<'_>,
+        txn: &mut Transaction,
         subscriber_id: Uuid,
         event_id: u64,
     ) -> Delivery {
@@ -130,8 +131,8 @@ impl DeliveryTable {
             next_attempt,
             _reserved: [0; 2],
         };
-        self.accessor().put_txn(txn, &(event_id, subscriber_id).into(), &delivery);
-        let index_key = NextAttemptKey::new(next_attempt, event_id, subscriber_id);
+        self.accessor().put_txn(txn, &packed!(event_id, subscriber_id), &delivery);
+        let index_key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().put_txn(txn, &index_key, &());
         delivery
     }
@@ -157,6 +158,40 @@ impl DeliveryTable {
             })
         }
     }
+
+    pub(crate) fn delete(&self, txn: &mut Transaction, delivery: &Delivery) {
+        let key = packed!(delivery.event_id, delivery.subscriber_id);
+        self.accessor().delete_txn(txn, &key);
+        let key = delivery.next_attempt_index_key();
+        self.next_attempt_index_accessor().delete_txn(txn, &key);
+    }
+
+    pub(crate) fn update_for_next_attempt(&self, txn: &mut Transaction, delivery: &mut Delivery) {
+        let attempts_made = delivery.attempts_made;
+        delivery.attempts_made += 1;
+        if delivery.attempts_made == MAX_ATTEMPTS {
+            self.delete(txn, &delivery);
+            return;
+        }
+
+        // Delete old index
+        //
+        // Ugh this is going to create so many tombstones lol
+        // It probably makes more sense to switch to FIFO compaction and just
+        // never explicitly delete old delivery objects
+        let old_key = delivery.next_attempt_index_key();
+        self.next_attempt_index_accessor().delete_txn(txn, &old_key);
+
+        // Update next attempt
+        let delay = next_attempt_delay(attempts_made);
+        delivery.next_attempt = Utc::now().checked_add_signed(delay).unwrap().into();
+
+        // Insert new data
+        let key = packed!(delivery.event_id, delivery.subscriber_id);
+        self.accessor().put_txn(txn, &key, delivery);
+        let key = delivery.next_attempt_index_key();
+        self.next_attempt_index_accessor().put_txn(txn, &key, &());
+    }
 }
 
 impl Delivery {
@@ -172,6 +207,16 @@ impl Delivery {
         self.next_attempt.into()
     }
 
+    fn next_attempt_index_key(&self) -> NextAttemptKey {
+        NextAttemptKey {
+            subscriber_id: self.subscriber_id,
+            yof: self.next_attempt.yof.into(),
+            seconds: self.next_attempt.seconds.into(),
+            nanos: self.next_attempt.nanos.into(),
+            event_id: self.event_id.into(),
+        }
+    }
+
     pub(crate) fn attempts_made(&self) -> u32 {
         self.attempts_made
     }
@@ -179,6 +224,8 @@ impl Delivery {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use middleman_db::Transaction;
 
     use crate::testing::TestHarness;
@@ -191,7 +238,7 @@ mod tests {
 
         let subscriber_id = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let event_id: u64 = 1;
-        let mut txn = Transaction::new(&app.db);
+        let mut txn = Transaction::new(Arc::clone(&app.db));
         let delivery = deliveries.create(&mut txn, subscriber_id, event_id);
         txn.commit().unwrap();
 

@@ -42,7 +42,7 @@ impl Db {
 
         Ok(Self {
             raw,
-            transaction_lock: TransactionLock::new(Duration::from_secs(300)),
+            transaction_lock: TransactionLock::new(),
         })
     }
 
@@ -56,12 +56,15 @@ impl Db {
     }
 
     pub fn get_column_family(self: &Arc<Self>, name: &str) -> Option<ColumnFamily> {
-        Some(ColumnFamily(
-            OwningRef::new(Arc::clone(self)).try_map(|db| db.raw.cf_handle(name).ok_or(())).ok()?,
-        ))
+        Some(ColumnFamily {
+            inner: OwningRef::new(Arc::clone(self))
+                .try_map(|db| db.raw.cf_handle(name).ok_or(()))
+                .ok()?,
+            name: name.to_owned().into(),
+        })
     }
 
-    pub fn begin_transaction(&self) -> Transaction<'_> {
+    pub fn begin_transaction(self: Arc<Self>) -> Transaction {
         Transaction::new(self)
     }
 }

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::sync::Arc;
 
 use byteview::ByteView;
 use dashmap::{DashMap, Entry};
@@ -10,27 +10,26 @@ use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::RawDb;
 
+type LockKey = (Arc<String>, ByteView);
+
 /// This is a lightweight lock that serves as a pessimistic transaction
 /// conflict resolution mechanism. Attempting to acquire a lock held by an
 /// existing transaction will simply fail.
 ///
 /// To prevent resource leaks, locks will expire after a configurable timeout.
-// TODO: Instead of an expiration, support deleting by transaction ID.
 #[derive(Debug)]
 pub(crate) struct TransactionLock {
-    lock_expiration: std::time::Duration,
-    keys: DashMap<ByteView, Instant>,
+    keys: DashMap<LockKey, Instant>,
 }
 
 impl TransactionLock {
-    pub(crate) fn new(lock_expiration: Duration) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            lock_expiration,
             keys: Default::default(),
         }
     }
 
-    pub(crate) fn acquire(&self, key: ByteView) -> bool {
+    pub(crate) fn acquire(&self, key: LockKey) -> bool {
         match self.keys.entry(key) {
             Entry::Occupied(_) => false,
             Entry::Vacant(e) => {
@@ -40,24 +39,19 @@ impl TransactionLock {
         }
     }
 
-    pub(crate) fn release(&self, key: &ByteView) {
+    pub(crate) fn release(&self, key: &LockKey) {
         // FIXME: Lock could be held by a different transaction if it leaked
         self.keys.remove(key);
-    }
-
-    pub(crate) fn recycle_leaks(&self) {
-        let now = Instant::now();
-        self.keys.retain(|_, v| now.duration_since(*v) < self.lock_expiration);
     }
 }
 
 // Wrapper to handle destructor
-struct Locks<'db> {
-    db: &'db Db,
-    keys: Vec<ByteView>,
+struct Locks {
+    db: Arc<Db>,
+    keys: Vec<LockKey>,
 }
 
-impl<'db> Drop for Locks<'db> {
+impl Drop for Locks {
     fn drop(&mut self) {
         for key in self.keys.iter() {
             self.db.transaction_lock.release(key);
@@ -66,17 +60,14 @@ impl<'db> Drop for Locks<'db> {
 }
 
 /// An atomic DB transaction with optional locking.
-// XXX: Instead of locking a single key, just have a "lock for update" method
-pub struct Transaction<'db> {
-    db: &'db Db,
-    locks: Locks<'db>,
+pub struct Transaction {
+    locks: Locks,
     write_batch: rocksdb::WriteBatchWithTransaction<true>,
 }
 
-impl<'db> Transaction<'db> {
-    pub fn new(db: &'db Db) -> Self {
+impl Transaction {
+    pub fn new(db: Arc<Db>) -> Self {
         Self {
-            db,
             write_batch: WriteBatchWithTransaction::new(),
             locks: Locks {
                 db,
@@ -86,10 +77,11 @@ impl<'db> Transaction<'db> {
     }
 
     pub fn db(&self) -> &Db {
-        self.locks.db
+        &self.locks.db
     }
 
-    pub fn lock_key(&mut self, key: ByteView) -> Result<()> {
+    pub fn lock_key(&mut self, cf: &ColumnFamily, key: impl Into<ByteView>) -> Result<()> {
+        let key = (Arc::clone(&cf.name), key.into());
         if self.db().transaction_lock.acquire(key.clone()) {
             self.locks.keys.push(key);
             Ok(())
@@ -103,7 +95,7 @@ impl<'db> Transaction<'db> {
         cf: &ColumnFamily,
         key: impl AsRef<[u8]>,
     ) -> Result<Option<Vec<u8>>> {
-        Ok(self.db.raw.get_cf(cf.raw(), key)?)
+        Ok(self.db().raw.get_cf(cf.raw(), key)?)
     }
 
     pub(crate) fn put_cf(
@@ -118,22 +110,30 @@ impl<'db> Transaction<'db> {
     pub(crate) fn put_cf_locked(
         &mut self,
         cf: &ColumnFamily,
-        key: impl AsRef<[u8]>,
+        // XXX: Ideally there would be a CowByteView type that is either
+        // &'a [u8] or ByteView which we can convert to.
+        key: impl Into<ByteView>,
         value: impl AsRef<[u8]>,
     ) -> Result<()> {
-        self.lock_key(key.as_ref().into())?;
-        self.put_cf(&cf, key, value);
+        let key = key.into();
+        self.lock_key(cf, key.clone())?;
+        self.put_cf(&cf, &key[..], value);
         Ok(())
+    }
+
+    pub(crate) fn delete(&mut self, cf: &ColumnFamily, key: impl AsRef<[u8]>) {
+        self.write_batch.delete_cf(cf.raw(), key.as_ref());
     }
 
     pub(crate) fn raw_iterator_cf<'a>(
         &'a self,
         cf: &ColumnFamily,
     ) -> rocksdb::DBRawIteratorWithThreadMode<'a, RawDb> {
-        self.db.raw.raw_iterator_cf(cf.raw())
+        self.db().raw.raw_iterator_cf(cf.raw())
     }
 
     pub fn commit(self) -> Result<()> {
-        Ok(self.db.raw.write(self.write_batch)?)
+        let Self { write_batch, locks } = self;
+        Ok(locks.db.raw.write(write_batch)?)
     }
 }

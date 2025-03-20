@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use owning_ref::OwningRef;
@@ -6,15 +7,18 @@ use crate::db::Db;
 use crate::error::Result;
 
 #[derive(Clone)]
-pub struct ColumnFamily(pub(crate) OwningRef<Arc<Db>, rocksdb::ColumnFamily>);
+pub struct ColumnFamily {
+    pub(crate) inner: OwningRef<Arc<Db>, rocksdb::ColumnFamily>,
+    pub(crate) name: Arc<String>,
+}
 
 impl ColumnFamily {
     pub fn db(&self) -> &Db {
-        self.0.as_owner()
+        self.inner.as_owner()
     }
 
     pub fn raw(&self) -> &rocksdb::ColumnFamily {
-        &*self.0
+        &*self.inner
     }
 
     pub(crate) fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
@@ -29,7 +33,7 @@ impl ColumnFamily {
 impl std::fmt::Debug for ColumnFamily {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ColumnFamily")
-            .field("owner", &self.0.as_owner())
+            .field("owner", &self.inner.as_owner())
             .field("reference", &"<rocksdb::ColumnFamily>")
             .finish()
     }

@@ -176,16 +176,12 @@ impl EventTable {
     /// guaranteed to be ordered.
     // XXX: Is it possible to catch write conflicts and report those as a
     // unique status so the operation need not be retried?
-    pub fn create(
-        &self,
-        txn: &mut Transaction<'_>,
-        mut builder: EventBuilder,
-    ) -> Result<Box<Event>> {
+    pub fn create(&self, txn: &mut Transaction, mut builder: EventBuilder) -> Result<Box<Event>> {
         let (tag, idempotency_key) = (builder.tag.unwrap(), builder.idempotency_key.unwrap());
 
         // Acquire lock
         let key: Packed3<[u8; 6], Uuid, Uuid> = (*b"event:", tag, idempotency_key).into();
-        txn.lock_key(AsBytes::as_bytes(&key).into())?;
+        txn.lock_key(&self.cf, AsBytes::as_bytes(&key))?;
 
         // Try to fetch existing record by idempotency key
         let existing_id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
@@ -217,7 +213,7 @@ impl EventTable {
 
     pub fn get_id_by_idempotency_key(
         &self,
-        txn: &mut Transaction<'_>,
+        txn: &mut Transaction,
         tag: Uuid,
         idempotency_key: Uuid,
     ) -> Result<Option<u64>> {
@@ -232,7 +228,7 @@ impl EventTable {
 
     pub fn get_by_idempotency_key(
         &self,
-        txn: &mut Transaction<'_>,
+        txn: &mut Transaction,
         tag: Uuid,
         idempotency_key: Uuid,
     ) -> Result<Option<Box<Event>>> {
@@ -274,6 +270,8 @@ impl EventTable {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use db::transaction::Transaction;
     use middleman_db as db;
 
@@ -318,7 +316,7 @@ mod tests {
         let events = &app.events;
 
         let event = testing_event();
-        let mut txn = Transaction::new(&app.db);
+        let mut txn = Transaction::new(Arc::clone(&app.db));
         let event = events.create(&mut txn, event).unwrap();
         txn.commit().unwrap();
 
@@ -335,17 +333,17 @@ mod tests {
         let events = &app.events;
 
         let builder = testing_event();
-        let mut txn = Transaction::new(&app.db);
+        let mut txn = Transaction::new(Arc::clone(&app.db));
         let event = events.create(&mut txn, builder.clone()).unwrap();
         txn.commit().unwrap();
 
-        let mut txn = Transaction::new(&app.db);
+        let mut txn = Transaction::new(Arc::clone(&app.db));
         let event2 = events.create(&mut txn, builder).unwrap();
         txn.commit().unwrap();
         assert_eq!(event, event2);
 
         // Also test lookup by idempotency key
-        let mut txn = Transaction::new(&app.db);
+        let mut txn = Transaction::new(Arc::clone(&app.db));
         let event2 = events
             .get_by_idempotency_key(&mut txn, event.tag(), event.idempotency_key())
             .unwrap()
@@ -360,7 +358,7 @@ mod tests {
         let app = harness.application();
         let events = &app.events;
 
-        let mut txn = Transaction::new(&app.db);
+        let mut txn = Transaction::new(Arc::clone(&app.db));
         let mut base = EventBuilder::new();
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         base.content_type(ContentType::Json).tag(tag);
@@ -403,10 +401,10 @@ mod tests {
         let events = &app.events;
 
         let event = testing_event();
-        let mut txn1 = Transaction::new(&app.db);
+        let mut txn1 = Transaction::new(Arc::clone(&app.db));
         events.create(&mut txn1, event.clone()).unwrap();
 
-        let mut txn2 = Transaction::new(&app.db);
+        let mut txn2 = Transaction::new(Arc::clone(&app.db));
         assert_eq!(
             events.create(&mut txn2, event).unwrap_err().kind(),
             ErrorKind::Busy

@@ -139,19 +139,19 @@ macro_rules! packed {
         $_0
     };
     ($_1:expr, $_2:expr) => {
-        Packed2($_1, $_2)
+        $crate::key::Packed2($_1, $_2)
     };
     ($_1:expr, $_2:expr, $_3:expr) => {
-        Packed3($_1, $_2, $_3)
+        $crate::key::Packed3($_1, $_2, $_3)
     };
     ($_1:expr, $_2:expr, $_3:expr, $_4:expr) => {
-        Packed4($_1, $_2, $_3, $_4)
+        $crate::key::Packed4($_1, $_2, $_3, $_4)
     };
     ($_1:expr, $_2:expr, $_3:expr, $_4:expr, $_5:expr) => {
-        Packed5($_1, $_2, $_3, $_4, $_5)
+        $crate::key::Packed5($_1, $_2, $_3, $_4, $_5)
     };
     ($_1:expr, $_2:expr, $_3:expr, $_4:expr, $_5:expr, $_6:expr) => {
-        Packed6($_1, $_2, $_3, $_4, $_5, $_6)
+        $crate::key::Packed6($_1, $_2, $_3, $_4, $_5, $_6)
     };
 }
 

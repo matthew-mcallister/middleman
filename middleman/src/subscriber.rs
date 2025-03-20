@@ -67,7 +67,7 @@ impl SubscriberTable {
         Accessor::new(&self.tag_index_cf)
     }
 
-    pub fn create(&self, txn: &mut Transaction<'_>, subscriber: &Subscriber) -> Result<()> {
+    pub fn create(&self, txn: &mut Transaction, subscriber: &Subscriber) -> Result<()> {
         let key = subscriber.id();
         self.accessor().put_txn(txn, &key, subscriber);
         let key = packed!(subscriber.tag(), subscriber.id());
@@ -177,6 +177,8 @@ impl SubscriberBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use regex::Regex;
     use url::Url;
 
@@ -208,7 +210,7 @@ mod tests {
         let app = harness.application();
         let subscribers = &app.subscribers;
 
-        let mut txn = Transaction::new(&app.db);
+        let mut txn = Transaction::new(Arc::clone(&app.db));
         subscribers.create(&mut txn, &subscriber).unwrap();
         txn.commit().unwrap();
 

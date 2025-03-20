@@ -42,11 +42,7 @@ impl<
         }
     }
 
-    pub unsafe fn get_txn_unchecked(
-        &self,
-        txn: &Transaction<'_>,
-        key: &K,
-    ) -> Result<Option<Box<V>>> {
+    pub unsafe fn get_txn_unchecked(&self, txn: &Transaction, key: &K) -> Result<Option<Box<V>>> {
         let key = unsafe { key.as_bytes_unchecked() };
         match txn.get_cf(self.cf, key)? {
             Some(bytes) => Ok(Some(V::box_from_bytes_unchecked(bytes))),
@@ -62,16 +58,21 @@ impl<
         Ok(self.db().raw.put_cf(self.cf.raw(), key, value)?)
     }
 
-    pub fn put_txn(&self, txn: &mut Transaction<'_>, key: &K, value: &V) {
+    pub fn put_txn(&self, txn: &mut Transaction, key: &K, value: &V) {
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
         txn.put_cf(self.cf, key, value);
     }
 
-    pub fn put_txn_locked(&self, txn: &mut Transaction<'_>, key: &K, value: &V) -> Result<()> {
+    pub fn put_txn_locked(&self, txn: &mut Transaction, key: &K, value: &V) -> Result<()> {
         let key = unsafe { key.as_bytes_unchecked() };
         let value = unsafe { value.as_bytes_unchecked() };
         txn.put_cf_locked(self.cf, key, value)
+    }
+
+    pub fn delete_txn(&self, txn: &mut Transaction, key: &K) {
+        let key = unsafe { key.as_bytes_unchecked() };
+        txn.delete(self.cf, key);
     }
 
     pub unsafe fn cursor_unchecked(&self) -> BaseCursor<'db, K, V> {
