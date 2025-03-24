@@ -7,17 +7,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use compact_str::CompactString;
+use http::{Request, Response};
+use http_body_util::BodyExt;
+use hyper_util::rt::TokioIo;
 
 use crate::config::Config;
 use crate::connection::{Connection, ConnectionFactory, Http11ConnectionPool, Key};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::Application;
 
 #[derive(Default)]
-pub struct TestHarness {
-    db_dir: Option<tempfile::TempDir>,
-    application: Option<Application>,
-    connection_pool: Option<Http11ConnectionPool<CompactString, TestConnection>>,
+pub(crate) struct TestHarness {
+    pub(crate) db_dir: Option<tempfile::TempDir>,
+    pub(crate) application: Option<Application>,
+    pub(crate) connection_pool: Option<Http11ConnectionPool<CompactString, TestConnection>>,
 }
 
 impl TestHarness {
@@ -125,4 +128,36 @@ impl ConnectionFactory for TestConnectionFactory {
             })
         })
     }
+}
+
+pub(crate) async fn http_server<F, S>(f: F) -> Result<(u16, impl Future<Output: Send> + Send)>
+where
+    S: Future<Output = Result<Response<String>>> + Send,
+    F: Fn(Request<String>) -> S + Clone + Send,
+{
+    let host = "127.0.0.1";
+    let listener = tokio::net::TcpListener::bind((host, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let responder = async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { return };
+            let g = f.clone();
+            let hyper_service =
+                hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+                    let h = g.clone();
+                    async move {
+                        let (parts, body) = req.into_parts();
+                        let body =
+                            std::str::from_utf8(&body.collect().await?.to_bytes())?.to_owned();
+                        let request = Request::from_parts(parts, body);
+                        let response = h(request).await?;
+                        Ok::<_, Box<Error>>(response)
+                    }
+                });
+            let conn = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), hyper_service);
+            conn.await.unwrap();
+        }
+    };
+    Ok((port, responder))
 }

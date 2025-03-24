@@ -12,7 +12,6 @@ mod scheduler;
 pub mod subscriber;
 #[cfg(test)]
 mod testing;
-pub mod types;
 mod util;
 
 pub use app::Application;

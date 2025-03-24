@@ -59,6 +59,10 @@ impl SubscriberTable {
         Ok(Self { cf, tag_index_cf })
     }
 
+    pub(crate) fn db(&self) -> &Arc<Db> {
+        self.cf.db()
+    }
+
     fn accessor<'a>(&'a self) -> Accessor<'a, SubscriberKey, Subscriber> {
         Accessor::new(&self.cf)
     }
@@ -77,6 +81,12 @@ impl SubscriberTable {
 
     pub fn get(&self, id: Uuid) -> Result<Option<Box<Subscriber>>> {
         unsafe { Ok(self.accessor().get_unchecked(&id)?) }
+    }
+
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = Result<Box<Subscriber>>> + 'a {
+        let mut cursor = unsafe { self.accessor().cursor_unchecked() };
+        cursor.seek_to_first();
+        cursor.values().map(|r| r.map_err(Into::into))
     }
 
     /// Iterates over subscribers by tag.

@@ -10,7 +10,6 @@ use uuid::Uuid;
 use self::to_json::ToJson;
 use crate::error::Result;
 use crate::event::EventBuilder;
-use crate::types::ContentType;
 use crate::Application;
 
 pub(crate) mod to_json;
@@ -19,7 +18,6 @@ pub(crate) mod to_json;
 struct PutEvent {
     tag: Uuid,
     idempotency_key: Uuid,
-    content_type: ContentType,
     stream: String,
     payload: String,
 }
@@ -38,7 +36,6 @@ impl<'a> From<&'a PutEvent> for EventBuilder<'a> {
         builder
             .idempotency_key(value.idempotency_key)
             .tag(value.tag)
-            .content_type(value.content_type)
             .stream(&value.stream)
             .payload(&value.payload);
         builder

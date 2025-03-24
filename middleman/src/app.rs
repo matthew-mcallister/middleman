@@ -10,7 +10,8 @@ use crate::error::Result;
 use crate::event::{Event, EventBuilder, EventTable};
 use crate::http::{SubscriberConnectionFactory, SubscriberConnectionPool};
 use crate::migration::Migrator;
-use crate::subscriber::SubscriberTable;
+use crate::scheduler::{self, Scheduler};
+use crate::subscriber::{Subscriber, SubscriberBuilder, SubscriberTable};
 
 #[derive(Debug)]
 pub struct Application {
@@ -20,6 +21,7 @@ pub struct Application {
     pub(crate) deliveries: Arc<DeliveryTable>,
     pub(crate) subscribers: Arc<SubscriberTable>,
     pub(crate) connections: Arc<SubscriberConnectionPool>,
+    pub(crate) scheduler: Scheduler,
 }
 
 impl Application {
@@ -41,6 +43,13 @@ impl Application {
             Box::new(SubscriberConnectionFactory::new(Arc::clone(&subscribers))?);
         let connections = Arc::new(SubscriberConnectionPool::new(settings, connection_factory));
 
+        let scheduler = Scheduler::new(
+            Arc::clone(&subscribers),
+            Arc::clone(&events),
+            Arc::clone(&deliveries),
+            Arc::clone(&connections),
+        )?;
+
         Ok(Self {
             config,
             db,
@@ -48,6 +57,7 @@ impl Application {
             deliveries,
             subscribers,
             connections,
+            scheduler,
         })
     }
 
@@ -58,6 +68,7 @@ impl Application {
         let event = self.events.create(&mut txn, builder)?;
         self.create_deliveries_for_event(&mut txn, event.id(), &event)?;
         txn.commit()?;
+        // TODO: Schedule event to be delivered if queue is not too full
         Ok(event)
     }
 
@@ -72,6 +83,19 @@ impl Application {
             self.deliveries.create(txn, subscriber?.id(), event_id);
         }
         Ok(())
+    }
+
+    pub fn create_subscriber(&self, mut builder: SubscriberBuilder) -> Result<Box<Subscriber>> {
+        let subscriber = builder.build()?;
+        let mut txn = self.db.begin_transaction();
+        self.subscribers.create(&mut txn, &subscriber)?;
+        txn.commit()?;
+        self.scheduler.register_subscriber(&subscriber);
+        Ok(subscriber)
+    }
+
+    pub fn schedule_deliveries(&self) -> Result<()> {
+        self.scheduler.schedule_all()
     }
 }
 
@@ -88,7 +112,6 @@ mod tests {
     use crate::event::EventBuilder;
     use crate::subscriber::SubscriberBuilder;
     use crate::testing::TestHarness;
-    use crate::types::ContentType;
 
     #[test]
     fn test_create_event_idempotency() {
@@ -98,12 +121,7 @@ mod tests {
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000001");
         let mut builder = EventBuilder::new();
-        builder
-            .content_type(ContentType::Json)
-            .tag(tag)
-            .stream("asdf")
-            .payload("1234321")
-            .idempotency_key(idempotency_key);
+        builder.tag(tag).stream("asdf").payload("1234321").idempotency_key(idempotency_key);
         let event = app.create_event(builder.clone()).unwrap();
 
         let event2 = app.events.get(tag, event.id()).unwrap().unwrap();
@@ -148,12 +166,7 @@ mod tests {
         // Create an event that matches both subscribers
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let mut event = EventBuilder::new();
-        event
-            .content_type(ContentType::Json)
-            .tag(tag)
-            .stream("asdf:1234")
-            .payload("1234321")
-            .idempotency_key(idempotency_key);
+        event.tag(tag).stream("asdf:1234").payload("1234321").idempotency_key(idempotency_key);
         let event = app.create_event(event).unwrap();
 
         let delivery1 = app.deliveries.get(subscriber1_id, event.id()).unwrap().unwrap();

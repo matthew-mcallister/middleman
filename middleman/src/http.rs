@@ -84,10 +84,11 @@ impl<'a> ConnectionInfo<'a> {
             _ => Err(ErrorKind::InvalidInput)?,
         };
         let default_port = if tls { 443 } else { 80 };
+        let port = url.port().unwrap_or(default_port);
         let host = url.host().ok_or(ErrorKind::InvalidInput)?;
         Ok(Self {
             host,
-            port: url.port().unwrap_or(default_port),
+            port,
             tls,
             keep_alive_secs: 30,
         })
@@ -222,7 +223,7 @@ mod tests {
                     "\r\n",
                 ),
             );
-            stream.write(response.as_bytes()).await.unwrap();
+            stream.write_all(response.as_bytes()).await.unwrap();
         });
 
         let conn_info = ConnectionInfo {

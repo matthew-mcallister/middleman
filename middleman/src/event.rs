@@ -12,7 +12,6 @@ use uuid::Uuid;
 use crate::api::to_json::WriteJson;
 use crate::db::ColumnFamilyName;
 use crate::error::Result;
-use crate::types::ContentType;
 
 // TODO: ID should probably be stored on the event
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +77,6 @@ impl WriteJson for Event {
 pub struct EventBuilder<'a> {
     idempotency_key: Option<Uuid>,
     tag: Option<Uuid>,
-    content_type: Option<ContentType>,
     stream: Option<&'a str>,
     payload: Option<&'a str>,
 }
@@ -86,11 +84,6 @@ pub struct EventBuilder<'a> {
 impl<'a> EventBuilder<'a> {
     pub fn new() -> Self {
         Default::default()
-    }
-
-    pub fn content_type(&mut self, ty: ContentType) -> &mut Self {
-        self.content_type = Some(ty);
-        self
     }
 
     pub fn idempotency_key(&mut self, key: impl Into<Uuid>) -> &mut Self {
@@ -275,7 +268,7 @@ mod tests {
     use db::transaction::Transaction;
     use middleman_db as db;
 
-    use super::{ContentType, EventBuilder};
+    use super::EventBuilder;
     use crate::error::ErrorKind;
     use crate::testing::TestHarness;
 
@@ -286,7 +279,6 @@ mod tests {
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000001");
         let payload = "1234ideclareathumbwar";
         let event = EventBuilder::new()
-            .content_type(ContentType::Json)
             .idempotency_key(idempotency_key)
             .stream(stream)
             .tag(tag)
@@ -301,7 +293,6 @@ mod tests {
     fn testing_event() -> EventBuilder<'static> {
         let mut builder = EventBuilder::new();
         builder
-            .content_type(ContentType::Json)
             .tag(uuid::uuid!("00000000-0000-8000-8000-000000000000"))
             .stream("asdf")
             .payload("1234321")
@@ -361,7 +352,7 @@ mod tests {
         let mut txn = Transaction::new(Arc::clone(&app.db));
         let mut base = EventBuilder::new();
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
-        base.content_type(ContentType::Json).tag(tag);
+        base.tag(tag);
         let mut event1 = base.clone();
         event1
             .stream("stream1")

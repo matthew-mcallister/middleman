@@ -76,6 +76,23 @@ impl Transaction {
         }
     }
 
+    /// Attempts to acquire a lock and only begins a transaction if the lock is
+    /// successfully acquired. This is useful for implementing "skip locked"
+    /// functionality.
+    pub fn new_locked(db: Arc<Db>, cf: &ColumnFamily, key: impl Into<ByteView>) -> Result<Self> {
+        let key = (Arc::clone(&cf.name), key.into());
+        if !db.transaction_lock.acquire(key.clone()) {
+            Err(Error::transaction_conflict())?
+        }
+        Ok(Self {
+            write_batch: WriteBatchWithTransaction::new(),
+            locks: Locks {
+                db,
+                keys: vec![key],
+            },
+        })
+    }
+
     pub fn db(&self) -> &Db {
         &self.locks.db
     }

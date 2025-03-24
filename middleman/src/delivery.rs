@@ -5,6 +5,7 @@ use db::bytes::AsBytes;
 use db::key::Packed2;
 use db::{Accessor, ColumnFamily, ColumnFamilyDescriptor, Db, Transaction};
 use middleman_db::key::{BigEndianU32, BigEndianU64};
+use middleman_db::prefix::IsPrefixOf;
 use middleman_db::{self as db, packed, Cursor};
 use middleman_macros::db_key;
 use rand::Rng;
@@ -26,7 +27,7 @@ fn next_attempt_delay(last_attempt: u32) -> chrono::TimeDelta {
 }
 
 // UTC datetime with stable binary representation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(C)]
 pub struct DateTime {
     yof: u32,
@@ -87,8 +88,11 @@ pub struct DeliveryTable {
     next_attempt_index: ColumnFamily,
 }
 
-type DeliveryKey = Packed2<u64, Uuid>;
+type DeliveryKey = Packed2<BigEndianU64, Uuid>;
 
+// TODO: Maybe we could have a global next attempt index with the subscriber
+// as suffix rather than prefix. Then you can do a "fast scan" which does not
+// include subscriber ID and a "fair scan" that does include subscriber ID.
 #[db_key]
 pub(crate) struct NextAttemptKey {
     subscriber_id: Uuid,
@@ -96,6 +100,22 @@ pub(crate) struct NextAttemptKey {
     seconds: BigEndianU32,
     nanos: BigEndianU32,
     event_id: BigEndianU64,
+}
+
+impl NextAttemptKey {
+    fn timestamp(&self) -> DateTime {
+        DateTime {
+            yof: self.yof.into(),
+            seconds: self.seconds.into(),
+            nanos: self.nanos.into(),
+        }
+    }
+}
+
+impl IsPrefixOf<NextAttemptKey> for Uuid {
+    fn is_prefix_of(&self, other: &NextAttemptKey) -> bool {
+        *self == other.subscriber_id
+    }
 }
 
 impl DeliveryTable {
@@ -114,7 +134,11 @@ impl DeliveryTable {
     }
 
     fn next_attempt_index_accessor<'a>(&'a self) -> Accessor<'a, NextAttemptKey, ()> {
-        Accessor::new(&self.cf)
+        Accessor::new(&self.next_attempt_index)
+    }
+
+    pub(crate) fn db(&self) -> &Arc<Db> {
+        &self.cf.db()
     }
 
     pub(crate) fn create(
@@ -131,36 +155,74 @@ impl DeliveryTable {
             next_attempt,
             _reserved: [0; 2],
         };
-        self.accessor().put_txn(txn, &packed!(event_id, subscriber_id), &delivery);
+        self.accessor().put_txn(txn, &packed!(event_id.into(), subscriber_id), &delivery);
         let index_key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().put_txn(txn, &index_key, &());
         delivery
     }
 
     pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> Result<Option<Delivery>> {
-        unsafe { Ok(self.accessor().get_unchecked(&(event_id, subscriber_id).into())?.map(|x| *x)) }
-    }
-
-    pub(crate) fn iter<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = db::Result<(DeliveryKey, Delivery)>> + 'a {
-        unsafe { self.accessor().cursor_unchecked().into_iter() }
-    }
-
-    pub(crate) fn iter_by_next_attempt<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = Result<Delivery>> + 'a {
         unsafe {
-            self.next_attempt_index_accessor().cursor_unchecked().keys().map(|key| {
-                let key = key?;
-                let (subscriber_id, event_id) = (key.subscriber_id, key.event_id);
-                self.get(subscriber_id, event_id.into()).transpose().unwrap()
-            })
+            Ok(
+                self.accessor()
+                    .get_unchecked(&(event_id.into(), subscriber_id).into())?
+                    .map(|x| *x),
+            )
+        }
+    }
+
+    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = db::Result<Delivery>> + 'a {
+        let mut cursor = unsafe { self.accessor().cursor_unchecked() };
+        cursor.seek_to_first();
+        cursor.values().map(|r| r.map_err(Into::into))
+    }
+
+    pub(crate) fn iter_by_next_attempt_skip_locked<'a>(
+        &'a self,
+        subscriber_id: Uuid,
+        max_time: chrono::DateTime<chrono::Utc>,
+    ) -> impl Iterator<Item = Result<(Transaction, Uuid, u64)>> + 'a {
+        unsafe {
+            let max_time: DateTime = max_time.into();
+            let mut done = false;
+            self.next_attempt_index_accessor()
+                .cursor_unchecked()
+                .prefix_iter::<Uuid>(subscriber_id)
+                .keys()
+                .filter_map(move |key| {
+                    if done {
+                        return None;
+                    }
+
+                    let key = match key {
+                        Ok(key) => key,
+                        Err(e) => return Some(Err(e.into())),
+                    };
+
+                    if key.timestamp() >= max_time {
+                        done = true;
+                        return None;
+                    }
+
+                    let NextAttemptKey {
+                        subscriber_id,
+                        event_id,
+                        ..
+                    } = key;
+                    let key: DeliveryKey = packed!(event_id, subscriber_id);
+                    let transaction =
+                        self.db().begin_transaction_locked(&self.cf, AsBytes::as_bytes(&key));
+
+                    match transaction {
+                        Ok(transaction) => Some(Ok((transaction, subscriber_id, event_id.into()))),
+                        Err(_) => None,
+                    }
+                })
         }
     }
 
     pub(crate) fn delete(&self, txn: &mut Transaction, delivery: &Delivery) {
-        let key = packed!(delivery.event_id, delivery.subscriber_id);
+        let key = packed!(delivery.event_id.into(), delivery.subscriber_id);
         self.accessor().delete_txn(txn, &key);
         let key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().delete_txn(txn, &key);
@@ -187,7 +249,7 @@ impl DeliveryTable {
         delivery.next_attempt = Utc::now().checked_add_signed(delay).unwrap().into();
 
         // Insert new data
-        let key = packed!(delivery.event_id, delivery.subscriber_id);
+        let key = packed!(delivery.event_id.into(), delivery.subscriber_id);
         self.accessor().put_txn(txn, &key, delivery);
         let key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().put_txn(txn, &key, &());

@@ -75,6 +75,7 @@ impl<
         txn.delete(self.cf, key);
     }
 
+    // FIXME: Should take initial seek location as a parameter
     pub unsafe fn cursor_unchecked(&self) -> BaseCursor<'db, K, V> {
         BaseCursor::<'_, K, V>::new(self.db().raw.raw_iterator_cf(self.cf.raw()))
     }

@@ -13,12 +13,16 @@ pub struct ColumnFamily {
 }
 
 impl ColumnFamily {
-    pub fn db(&self) -> &Db {
+    pub fn db(&self) -> &Arc<Db> {
         self.inner.as_owner()
     }
 
     pub fn raw(&self) -> &rocksdb::ColumnFamily {
         &*self.inner
+    }
+
+    pub fn name(&self) -> &Arc<String> {
+        &self.name
     }
 
     pub(crate) fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {

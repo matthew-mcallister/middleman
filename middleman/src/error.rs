@@ -72,6 +72,8 @@ impl Error {
     }
 }
 
+impl std::error::Error for Error {}
+
 macro_rules! define_errors {
     ($($ty:ty => $kind:expr),*$(,)?) => {
         $(
@@ -93,6 +95,7 @@ define_errors! {
     std::net::AddrParseError => ErrorKind::InvalidInput,
     std::num::ParseIntError => ErrorKind::InvalidInput,
     std::env::VarError => ErrorKind::InvalidInput,
+    std::str::Utf8Error => ErrorKind::InvalidInput,
     tokio_native_tls::native_tls::Error => ErrorKind::NetworkError,
     hyper::Error => ErrorKind::NetworkError,
     hyper_util::client::legacy::connect::dns::InvalidNameError => ErrorKind::InvalidInput,
