@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::sync::Arc;
 
 use db::big_tuple::{big_tuple, BigTuple};
@@ -9,7 +10,7 @@ use middleman_db::{self as db, ColumnFamilyDescriptor, Sequence};
 use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use uuid::Uuid;
 
-use crate::api::to_json::WriteJson;
+use crate::api::to_json::{ConsumerApiSerializer, JsonFormatter, ProducerApiSerializer};
 use crate::db::ColumnFamilyName;
 use crate::error::Result;
 
@@ -49,10 +50,8 @@ impl Event {
     }
 }
 
-impl WriteJson for Event {
-    fn write_json(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // We use raw string formatting so we can embed the payload directly
-        // into the JSON document.
+impl Display for JsonFormatter<ProducerApiSerializer<Event>> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
             concat!(
@@ -64,11 +63,29 @@ impl WriteJson for Event {
                 ",\"payload\":{payload}",
                 "}}",
             ),
-            id = self.id(),
-            idempotency_key = self.idempotency_key(),
-            tag = self.tag(),
-            stream = self.stream(),
-            payload = self.payload(),
+            id = self.0 .0.id(),
+            idempotency_key = self.0 .0.idempotency_key(),
+            tag = self.0 .0.tag(),
+            stream = self.0 .0.stream(),
+            payload = self.0 .0.payload(),
+        )
+    }
+}
+
+impl Display for JsonFormatter<ConsumerApiSerializer<Event>> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            concat!(
+                "{{",
+                "\"id\":{id}",
+                ",\"stream\":\"{stream}\"",
+                ",\"payload\":{payload}",
+                "}}",
+            ),
+            id = self.0 .0.id(),
+            stream = self.0 .0.stream(),
+            payload = self.0 .0.payload(),
         )
     }
 }

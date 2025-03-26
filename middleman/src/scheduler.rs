@@ -5,11 +5,10 @@ use std::time::SystemTime;
 
 use dashmap::DashMap;
 use http::Request;
-use middleman_db::bytes::AsBytes;
-use middleman_db::{packed, Db, Transaction};
+use middleman_db::{Db, Transaction};
 use uuid::Uuid;
 
-use crate::api::to_json::ToJson;
+use crate::api::to_json::{ConsumerApiSerializer, JsonFormatter};
 use crate::delivery::{Delivery, DeliveryTable};
 use crate::error::{Error, ErrorKind, Result};
 use crate::event::{Event, EventTable};
@@ -102,7 +101,8 @@ impl Task {
         let subscriber_id = self.delivery.subscriber_id();
         let mut txn = self.transaction;
 
-        let body = ToJson(&self.event).to_string();
+        let body =
+            JsonFormatter::from_ref(ConsumerApiSerializer::from_ref(&*self.event)).to_string();
         let mut request = Request::new(body);
         let timestamp: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
         timestamp_and_sign_request(timestamp.into(), self.subscriber.hmac_key(), &mut request);
@@ -317,11 +317,10 @@ mod tests {
 
         // Create a subscriber
         let url = format!("http://127.0.0.1:{port}/");
-        let subscriber_id = uuid::uuid!("12120000-0000-8000-8000-000000000001");
         let mut subscriber = SubscriberBuilder::new();
         subscriber
+            .id(uuid::uuid!("10000000-0000-8000-8000-000000000001"))
             .tag(tag)
-            .id(subscriber_id)
             .destination_url(Url::parse(&url).unwrap())
             .stream_regex(Regex::new(".*").unwrap())
             .hmac_key("key".to_owned());

@@ -7,9 +7,12 @@ use db::{Accessor, ColumnFamily, Cursor, Db, Transaction};
 use middleman_db::{self as db, ColumnFamilyDescriptor};
 use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use regex::Regex;
+use serde::ser::SerializeStruct;
+use serde::Serialize;
 use url::Url;
 use uuid::Uuid;
 
+use crate::api::to_json::{ConsumerApiSerializer, ProducerApiSerializer};
 use crate::db::ColumnFamilyName;
 use crate::error::Result;
 
@@ -29,6 +32,33 @@ big_tuple_struct! {
         pub destination_url[1]: str,
         pub stream_regex[2]: str,
         pub hmac_key[3]: str,
+    }
+}
+
+impl Serialize for ProducerApiSerializer<Subscriber> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_struct("Subscriber", 4)?;
+        s.serialize_field("tag", &self.0.tag())?;
+        s.serialize_field("id", &self.0.id())?;
+        s.serialize_field("destination_url", &self.0.destination_url())?;
+        s.serialize_field("stream_regex", &self.0.stream_regex())?;
+        s.end()
+    }
+}
+
+impl Serialize for ConsumerApiSerializer<Subscriber> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_struct("Subscriber", 3)?;
+        s.serialize_field("id", &self.0.id())?;
+        s.serialize_field("destination_url", &self.0.destination_url())?;
+        s.serialize_field("stream_regex", &self.0.stream_regex())?;
+        s.end()
     }
 }
 
@@ -71,12 +101,16 @@ impl SubscriberTable {
         Accessor::new(&self.tag_index_cf)
     }
 
-    pub fn create(&self, txn: &mut Transaction, subscriber: &Subscriber) -> Result<()> {
-        let key = subscriber.id();
-        self.accessor().put_txn(txn, &key, subscriber);
+    pub fn create(
+        &self,
+        txn: &mut Transaction,
+        mut builder: SubscriberBuilder,
+    ) -> Result<Box<Subscriber>> {
+        let subscriber = builder.build()?;
+        self.accessor().put_txn(txn, &subscriber.id(), &subscriber);
         let key = packed!(subscriber.tag(), subscriber.id());
         self.tag_index_accessor().put_txn(txn, &key, &());
-        Ok(())
+        Ok(subscriber)
     }
 
     pub fn get(&self, id: Uuid) -> Result<Option<Box<Subscriber>>> {
@@ -132,6 +166,7 @@ pub struct SubscriberBuilder {
     destination_url: Option<Url>,
     stream_regex: Option<Regex>,
     hmac_key: Option<String>,
+    max_connections: Option<u16>,
 }
 
 impl SubscriberBuilder {
@@ -164,7 +199,13 @@ impl SubscriberBuilder {
         self
     }
 
-    pub fn build(&mut self) -> Result<Box<Subscriber>> {
+    pub fn max_connections(&mut self, max_connections: u16) -> &mut Self {
+        // TODO: Actually handle this field
+        self.max_connections = Some(max_connections);
+        self
+    }
+
+    fn build(&mut self) -> Result<Box<Subscriber>> {
         let destination_url = self.destination_url.take().ok_or("missing subscriber URL")?;
         if destination_url.scheme() != "http" && destination_url.scheme() != "https" {
             return Err("Invalid subscriber URL".into());
@@ -204,26 +245,29 @@ mod tests {
         let regex = "^hello";
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let id = uuid::uuid!("00000000-0000-8000-8000-000000000001");
-        let subscriber = SubscriberBuilder::new()
+        let mut builder = SubscriberBuilder::new();
+        builder
+            .id(id)
             .tag(tag)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new(regex).unwrap())
-            .id(id)
-            .hmac_key("key".to_owned())
-            .build()
-            .unwrap();
-        assert_eq!(subscriber.tag(), tag);
-        assert_eq!(subscriber.stream_regex(), regex);
-        assert_eq!(subscriber.destination_url(), url);
+            .hmac_key("key".to_owned());
 
         let mut harness = TestHarness::new();
         let app = harness.application();
         let subscribers = &app.subscribers;
 
         let mut txn = Transaction::new(Arc::clone(&app.db));
-        subscribers.create(&mut txn, &subscriber).unwrap();
+        let subscriber = subscribers.create(&mut txn, builder).unwrap();
         txn.commit().unwrap();
 
-        assert_eq!(subscribers.get(id).unwrap().unwrap(), subscriber);
+        assert_eq!(subscriber.tag(), tag);
+        assert_eq!(subscriber.stream_regex(), regex);
+        assert_eq!(subscriber.destination_url(), url);
+
+        assert_eq!(
+            subscribers.get(subscriber.id()).unwrap().unwrap(),
+            subscriber,
+        );
     }
 }

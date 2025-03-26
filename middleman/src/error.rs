@@ -99,6 +99,8 @@ define_errors! {
     tokio_native_tls::native_tls::Error => ErrorKind::NetworkError,
     hyper::Error => ErrorKind::NetworkError,
     hyper_util::client::legacy::connect::dns::InvalidNameError => ErrorKind::InvalidInput,
+    regex::Error => ErrorKind::InvalidInput,
+    url::ParseError => ErrorKind::InvalidInput,
 }
 
 impl<'a> From<&'a str> for Box<Error> {

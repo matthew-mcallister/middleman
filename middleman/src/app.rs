@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::event::{Event, EventBuilder, EventTable};
 use crate::http::{SubscriberConnectionFactory, SubscriberConnectionPool};
 use crate::migration::Migrator;
-use crate::scheduler::{self, Scheduler};
+use crate::scheduler::Scheduler;
 use crate::subscriber::{Subscriber, SubscriberBuilder, SubscriberTable};
 
 #[derive(Debug)]
@@ -85,10 +85,9 @@ impl Application {
         Ok(())
     }
 
-    pub fn create_subscriber(&self, mut builder: SubscriberBuilder) -> Result<Box<Subscriber>> {
-        let subscriber = builder.build()?;
+    pub fn create_subscriber(&self, builder: SubscriberBuilder) -> Result<Box<Subscriber>> {
         let mut txn = self.db.begin_transaction();
-        self.subscribers.create(&mut txn, &subscriber)?;
+        let subscriber = self.subscribers.create(&mut txn, builder)?;
         txn.commit()?;
         self.scheduler.register_subscriber(&subscriber);
         Ok(subscriber)
@@ -139,29 +138,23 @@ mod tests {
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
 
         // Create two subscribers
-        let mut txn = Transaction::new(Arc::clone(&app.db));
         let url = "https://example.com/webhook";
-        let subscriber1_id = uuid::uuid!("12120000-0000-8000-8000-000000000001");
-        let subscriber1 = SubscriberBuilder::new()
+        let mut builder = SubscriberBuilder::new();
+        builder
+            .id(uuid::uuid!("00000000-0000-8000-8000-000000000001"))
             .tag(tag)
-            .id(subscriber1_id)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new("^asdf:").unwrap())
-            .hmac_key("key".to_owned())
-            .build()
-            .unwrap();
-        app.subscribers.create(&mut txn, &subscriber1).unwrap();
-        let subscriber2_id = uuid::uuid!("12120000-0000-8000-8000-000000000002");
-        let subscriber2 = SubscriberBuilder::new()
+            .hmac_key("key".to_owned());
+        let subscriber1 = app.create_subscriber(builder).unwrap();
+        let mut builder = SubscriberBuilder::new();
+        builder
+            .id(uuid::uuid!("00000000-0000-8000-8000-000000000002"))
             .tag(tag)
-            .id(subscriber2_id)
             .destination_url(Url::parse(url).unwrap())
             .stream_regex(Regex::new("^asdf:1234$").unwrap())
-            .hmac_key("key".to_owned())
-            .build()
-            .unwrap();
-        app.subscribers.create(&mut txn, &subscriber2).unwrap();
-        txn.commit().unwrap();
+            .hmac_key("key".to_owned());
+        let subscriber2 = app.create_subscriber(builder).unwrap();
 
         // Create an event that matches both subscribers
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000000");
@@ -169,10 +162,10 @@ mod tests {
         event.tag(tag).stream("asdf:1234").payload("1234321").idempotency_key(idempotency_key);
         let event = app.create_event(event).unwrap();
 
-        let delivery1 = app.deliveries.get(subscriber1_id, event.id()).unwrap().unwrap();
+        let delivery1 = app.deliveries.get(subscriber1.id(), event.id()).unwrap().unwrap();
         assert_eq!(delivery1.attempts_made(), 0);
 
-        let delivery2 = app.deliveries.get(subscriber2_id, event.id()).unwrap().unwrap();
+        let delivery2 = app.deliveries.get(subscriber2.id(), event.id()).unwrap().unwrap();
         assert_eq!(delivery2.attempts_made(), 0);
     }
 
