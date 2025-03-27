@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -95,7 +96,7 @@ pub struct EventBuilder<'a> {
     idempotency_key: Option<Uuid>,
     tag: Option<Uuid>,
     stream: Option<&'a str>,
-    payload: Option<&'a str>,
+    payload: Option<Cow<'a, str>>,
 }
 
 impl<'a> EventBuilder<'a> {
@@ -118,8 +119,8 @@ impl<'a> EventBuilder<'a> {
         self
     }
 
-    pub fn payload(&mut self, payload: &'a str) -> &mut Self {
-        self.payload = Some(payload);
+    pub fn payload(&mut self, payload: impl Into<Cow<'a, str>>) -> &mut Self {
+        self.payload = Some(payload.into());
         self
     }
 
@@ -132,7 +133,7 @@ impl<'a> EventBuilder<'a> {
                 _reserved: [0; 2],
             },
             self.stream.unwrap(),
-            self.payload.unwrap(),
+            &*self.payload.take().unwrap(),
         )
     }
 }

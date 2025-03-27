@@ -28,12 +28,12 @@ struct Resolver;
 
 impl Resolver {
     async fn resolve(&self, host: impl ToSocketAddrs) -> Result<SocketAddr> {
-        Ok(
-            tokio::net::lookup_host(host).await?.next().ok_or(Error::with_cause(
-                ErrorKind::NetworkError,
-                "DNS lookup failed",
-            ))?,
-        )
+        let mut hosts = tokio::net::lookup_host(host).await?;
+        let address = hosts.find(|a| a.is_ipv4());
+        Ok(address.ok_or(Error::with_cause(
+            ErrorKind::NetworkError,
+            "DNS lookup failed",
+        ))?)
     }
 }
 

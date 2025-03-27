@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use axum::extract::Query;
 use axum::response::IntoResponse;
-use axum::routing::{put, Router};
+use axum::routing::{post, put, Router};
 use axum::Json;
 use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
+use serde_json::Value;
 use to_json::{JsonFormatter, ProducerApiSerializer};
 use url::Url;
 use uuid::Uuid;
@@ -18,11 +19,11 @@ use crate::Application;
 pub(crate) mod to_json;
 
 #[derive(Serialize, Deserialize)]
-struct PutEvent {
+struct PostEvent {
     tag: Uuid,
     idempotency_key: Uuid,
     stream: String,
-    payload: String,
+    payload: Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,14 +34,16 @@ struct ListEvents {
     max_results: Option<u64>,
 }
 
-impl<'a> From<&'a PutEvent> for EventBuilder<'a> {
-    fn from(value: &'a PutEvent) -> Self {
+impl<'a> From<&'a PostEvent> for EventBuilder<'a> {
+    fn from(value: &'a PostEvent) -> Self {
         let mut builder = EventBuilder::new();
+        // XXX: Can this actually fail...?
+        let payload = serde_json::to_string(&value.payload).unwrap();
         builder
             .idempotency_key(value.idempotency_key)
             .tag(value.tag)
             .stream(&value.stream)
-            .payload(&value.payload);
+            .payload(payload);
         builder
     }
 }
@@ -82,9 +85,9 @@ pub fn router(app: Arc<Application>) -> Router {
     Router::new()
         .route(
             "/events",
-            put({
+            post({
                 let app = Arc::clone(&app);
-                async move |Json(event): Json<PutEvent>| -> Result<_> {
+                async move |Json(event): Json<PostEvent>| -> Result<_> {
                     let event: EventBuilder<'_> = (&event).into();
                     let event = app.create_event(event)?;
                     Ok(JsonFormatter(ProducerApiSerializer::from_box(event)).into_response())
@@ -133,5 +136,6 @@ pub fn router(app: Arc<Application>) -> Router {
                     Ok(Json(ProducerApiSerializer::from_vec(subscribers?)))
                 }
             }),
+            // XXX: delete
         )
 }

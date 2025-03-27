@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use dashmap::DashMap;
-use http::Request;
+use http::{HeaderValue, Request};
+use log::debug;
 use middleman_db::{Db, Transaction};
 use uuid::Uuid;
 
@@ -98,27 +99,44 @@ impl Task {
     }
 
     async fn run(mut self) -> Result<()> {
+        debug!(
+            "delivering event {} to subscriber {} attempt {}",
+            self.delivery.event_id(),
+            self.delivery.subscriber_id(),
+            self.delivery.attempts_made() + 1,
+        );
+
         let subscriber_id = self.delivery.subscriber_id();
         let mut txn = self.transaction;
 
         let body =
             JsonFormatter::from_ref(ConsumerApiSerializer::from_ref(&*self.event)).to_string();
         let mut request = Request::new(body);
+        *request.method_mut() = http::Method::POST;
+        request.headers_mut().insert(
+            "Content-Type",
+            HeaderValue::from_str("application/json").unwrap(),
+        );
         let timestamp: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
         timestamp_and_sign_request(timestamp.into(), self.subscriber.hmac_key(), &mut request);
 
-        let result = self.shared.connections.connect(&subscriber_id).await;
+        let connection = self.shared.connections.connect(&subscriber_id).await;
         // Mark the task as started whether or not the connection succeeded
         self.shared.stats.tasks_started_last_tick.fetch_add(1, Ordering::Acquire);
-        let mut connection = result?;
 
-        let response = connection.send_request(request).await;
+        let response = match connection {
+            Ok(mut connection) => connection.send_request(request).await,
+            Err(e) => Err(e),
+        };
         match response {
             Ok(response) if between(u16::from(response.status()), 200, 300) => {
                 self.shared.deliveries.delete(&mut txn, &mut self.delivery);
             },
             // TODO: Handle 300
-            Err(_) | Ok(_) => {
+            Err(e) => {
+                self.shared.deliveries.update_for_next_attempt(&mut txn, &mut self.delivery);
+            },
+            _ => {
                 self.shared.deliveries.update_for_next_attempt(&mut txn, &mut self.delivery);
             },
         }
@@ -156,6 +174,7 @@ impl UnitScheduler {
     /// autoregression on the last three ticks of measurements
     fn predict_tasks_started(&self) -> u32 {
         let [y0, y1, y2] = self.tasks_started_history.elems;
+        let (y0, y1, y2) = (y0 as f32, y1 as f32, y2 as f32);
         let m = (y2 - y0) as f32 / 2.0;
         let b = (y0 + y1 + y2) as f32 / 3.0;
         (2f32 * m + b).ceil().min(0.0) as u32

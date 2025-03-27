@@ -4,6 +4,7 @@ use chrono::{Datelike, Timelike, Utc};
 use db::bytes::AsBytes;
 use db::key::Packed2;
 use db::{Accessor, ColumnFamily, ColumnFamilyDescriptor, Db, Transaction};
+use log::debug;
 use middleman_db::key::{BigEndianU32, BigEndianU64};
 use middleman_db::prefix::IsPrefixOf;
 use middleman_db::{self as db, packed, Cursor};
@@ -14,7 +15,7 @@ use uuid::Uuid;
 use crate::db::ColumnFamilyName;
 use crate::error::Result;
 
-const MAX_ATTEMPTS: u32 = 12;
+const MAX_ATTEMPTS: u32 = 19;
 
 /// Returns a random duration to wait before the next attempt, with
 /// exponential backoff.
@@ -82,6 +83,34 @@ pub struct Delivery {
 
 unsafe impl AsBytes for Delivery {}
 
+impl Delivery {
+    pub(crate) fn subscriber_id(&self) -> Uuid {
+        self.subscriber_id
+    }
+
+    pub(crate) fn event_id(&self) -> u64 {
+        self.event_id
+    }
+
+    pub(crate) fn next_attempt(&self) -> chrono::DateTime<Utc> {
+        self.next_attempt.into()
+    }
+
+    fn next_attempt_index_key(&self) -> NextAttemptKey {
+        NextAttemptKey {
+            subscriber_id: self.subscriber_id,
+            yof: self.next_attempt.yof.into(),
+            seconds: self.next_attempt.seconds.into(),
+            nanos: self.next_attempt.nanos.into(),
+            event_id: self.event_id.into(),
+        }
+    }
+
+    pub(crate) fn attempts_made(&self) -> u32 {
+        self.attempts_made
+    }
+}
+
 #[derive(Debug)]
 pub struct DeliveryTable {
     pub(crate) cf: ColumnFamily,
@@ -90,9 +119,9 @@ pub struct DeliveryTable {
 
 type DeliveryKey = Packed2<BigEndianU64, Uuid>;
 
-// TODO: Maybe we could have a global next attempt index with the subscriber
-// as suffix rather than prefix. Then you can do a "fast scan" which does not
-// include subscriber ID and a "fair scan" that does include subscriber ID.
+// TODO: Add a global next attempt index with the subscriber as suffix rather
+// than prefix. Then support both "fast scan" over all subscribers and "fair
+// scan" done per-subscriber.
 #[db_key]
 pub(crate) struct NextAttemptKey {
     subscriber_id: Uuid,
@@ -232,6 +261,12 @@ impl DeliveryTable {
         let attempts_made = delivery.attempts_made;
         delivery.attempts_made += 1;
         if delivery.attempts_made == MAX_ATTEMPTS {
+            debug!(
+                "delivery of event {} to subscriber {} failed after {} attempts",
+                delivery.event_id(),
+                delivery.subscriber_id(),
+                MAX_ATTEMPTS,
+            );
             self.delete(txn, &delivery);
             return;
         }
@@ -253,34 +288,6 @@ impl DeliveryTable {
         self.accessor().put_txn(txn, &key, delivery);
         let key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().put_txn(txn, &key, &());
-    }
-}
-
-impl Delivery {
-    pub(crate) fn subscriber_id(&self) -> Uuid {
-        self.subscriber_id
-    }
-
-    pub(crate) fn event_id(&self) -> u64 {
-        self.event_id
-    }
-
-    pub(crate) fn next_attempt(&self) -> chrono::DateTime<Utc> {
-        self.next_attempt.into()
-    }
-
-    fn next_attempt_index_key(&self) -> NextAttemptKey {
-        NextAttemptKey {
-            subscriber_id: self.subscriber_id,
-            yof: self.next_attempt.yof.into(),
-            seconds: self.next_attempt.seconds.into(),
-            nanos: self.next_attempt.nanos.into(),
-            event_id: self.event_id.into(),
-        }
-    }
-
-    pub(crate) fn attempts_made(&self) -> u32 {
-        self.attempts_made
     }
 }
 
