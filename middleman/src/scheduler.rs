@@ -5,11 +5,11 @@ use std::time::SystemTime;
 
 use dashmap::DashMap;
 use http::{HeaderValue, Request};
-use log::debug;
 use middleman_db::{Db, Transaction};
+use tracing::debug;
 use uuid::Uuid;
 
-use crate::api::to_json::{ConsumerApiSerializer, JsonFormatter};
+use crate::api::to_json::{cast, ConsumerApiSerializer, JsonFormatter};
 use crate::delivery::{Delivery, DeliveryTable};
 use crate::error::{Error, ErrorKind, Result};
 use crate::event::{Event, EventTable};
@@ -109,9 +109,8 @@ impl Task {
         let subscriber_id = self.delivery.subscriber_id();
         let mut txn = self.transaction;
 
-        let body =
-            JsonFormatter::from_ref(ConsumerApiSerializer::from_ref(&*self.event)).to_string();
-        let mut request = Request::new(body);
+        let body = cast::<_, &JsonFormatter<_>>(cast::<_, &ConsumerApiSerializer<_>>(&*self.event));
+        let mut request = Request::new(body.to_string());
         *request.method_mut() = http::Method::POST;
         request.headers_mut().insert(
             "Content-Type",
@@ -134,6 +133,7 @@ impl Task {
             },
             // TODO: Handle 300
             Err(e) => {
+                debug!(delivery = ?self.delivery, "delivery failed: {}", e);
                 self.shared.deliveries.update_for_next_attempt(&mut txn, &mut self.delivery);
             },
             _ => {
@@ -360,8 +360,6 @@ mod tests {
             request_json,
             json!({
                 "id": 1,
-                "idempotency_key": "00000000-0000-8000-8000-000000000000",
-                "tag": "00000000-0000-8000-8000-000000000000",
                 "stream": "asdf:1234",
                 "payload": [1, 2, 3],
             })

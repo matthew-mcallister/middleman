@@ -5,6 +5,50 @@ use axum::response::{IntoResponse, Response};
 use http::HeaderValue;
 use serde::Serialize;
 
+/// Marker trait for safe two-way transmutation.
+///
+/// # Safety
+///
+/// If `T: Cast<U>`, then T and U must be safely convertible using
+/// `std::mem::transmute` and it must be safe to access aliased `&T` and `&U`
+/// references.
+unsafe trait Cast<T: ?Sized> {}
+
+unsafe impl<'a, T: ?Sized, U: ?Sized> Cast<&'a U> for &'a T where T: Cast<U> {}
+unsafe impl<'a, T: ?Sized, U: ?Sized> Cast<&'a mut U> for &'a mut T where T: Cast<U> {}
+unsafe impl<T: ?Sized, U: ?Sized> Cast<Box<U>> for Box<T> where T: Cast<U> {}
+unsafe impl<T, U> Cast<[U]> for [T] where T: Cast<U> {}
+unsafe impl<T, U> Cast<Vec<U>> for Vec<T> where T: Cast<U> {}
+
+/// Safely casts from one type to another.
+pub(crate) fn cast<T, U>(val: T) -> U
+where
+    T: Cast<U>,
+{
+    let new_val = unsafe { (&val as *const T as *const U).read() };
+    std::mem::forget(val);
+    new_val
+}
+
+/// Safely casts a reference to a possibly unsized type.
+pub(crate) fn cast_ref<T: ?Sized, U: ?Sized>(val: &T) -> &U
+where
+    T: Cast<U>,
+{
+    let new_val = unsafe { (&val as *const &T as *const &U).read() };
+    std::mem::forget(val);
+    new_val
+}
+
+pub(crate) fn cast_mut<T: ?Sized, U: ?Sized>(val: &mut T) -> &mut U
+where
+    T: Cast<U>,
+{
+    let new_val = unsafe { (&val as *const &mut T as *const &mut U).read() };
+    std::mem::forget(val);
+    new_val
+}
+
 macro_rules! wrapper {
     (
         $(#[$($meta:tt)*])*
@@ -14,83 +58,8 @@ macro_rules! wrapper {
         #[repr(transparent)]
         $vis struct $Wrapper<T: ?Sized>($vis T);
 
-        impl<'a, T: ?Sized> From<$Wrapper<&'a T>> for &'a $Wrapper<T> {
-            fn from(value: $Wrapper<&'a T>) -> Self {
-                unsafe { std::mem::transmute(value) }
-            }
-        }
-
-        impl<'a, T: ?Sized> From<$Wrapper<&'a mut T>> for &'a mut $Wrapper<T> {
-            fn from(value: $Wrapper<&'a mut T>) -> Self {
-                unsafe { std::mem::transmute(value) }
-            }
-        }
-
-        impl<'a, T> From<$Wrapper<&'a [T]>> for &'a [$Wrapper<T>] {
-            fn from(value: $Wrapper<&'a [T]>) -> Self {
-                unsafe { std::mem::transmute(value) }
-            }
-        }
-
-        impl<'a, T> From<$Wrapper<&'a mut [T]>> for &'a mut [$Wrapper<T>] {
-            fn from(value: $Wrapper<&'a mut [T]>) -> Self {
-                unsafe { std::mem::transmute(value) }
-            }
-        }
-
-        impl<T: ?Sized> From<$Wrapper<Box<T>>> for Box<$Wrapper<T>> {
-            fn from(value: $Wrapper<Box<T>>) -> Self {
-                unsafe { std::mem::transmute(value) }
-            }
-        }
-
-        impl<T: ?Sized> From<Box<$Wrapper<T>>> for $Wrapper<Box<T>> {
-            fn from(value: Box<$Wrapper<T>>) -> Self {
-                unsafe { std::mem::transmute(value) }
-            }
-        }
-
-        impl<T> From<$Wrapper<Vec<T>>> for Vec<$Wrapper<T>> {
-            fn from(value: $Wrapper<Vec<T>>) -> Self {
-                unsafe { std::mem::transmute(value) }
-            }
-        }
-
-        impl<T> From<Vec<$Wrapper<T>>> for $Wrapper<Vec<T>> {
-            fn from(value: Vec<$Wrapper<T>>) -> Self {
-                unsafe { std::mem::transmute(value) }
-            }
-        }
-
-        #[allow(dead_code)]
-        impl<T: ?Sized> $Wrapper<T> {
-            $vis fn from_ref(val: &T) -> &Self {
-                $Wrapper(val).into()
-            }
-
-            $vis fn from_mut(val: &mut T) -> &mut Self {
-                $Wrapper(val).into()
-            }
-
-            $vis fn from_box(val: Box<T>) -> Box<Self> {
-                $Wrapper(val).into()
-            }
-        }
-
-        #[allow(dead_code)]
-        impl<T> $Wrapper<T> {
-            $vis fn from_slice(val: &[T]) -> &[Self] {
-                $Wrapper(val).into()
-            }
-
-            $vis fn from_slice_mut(val: &mut [T]) -> &mut [Self] {
-                $Wrapper(val).into()
-            }
-
-            $vis fn from_vec(val: Vec<T>) -> Vec<Self> {
-                $Wrapper(val).into()
-            }
-        }
+        unsafe impl<T: ?Sized> Cast<T> for $Wrapper<T> {}
+        unsafe impl<T: ?Sized> Cast<$Wrapper<T>> for T {}
     };
 }
 
@@ -113,7 +82,7 @@ where
                 write!(f, ",")?;
             }
             first = false;
-            write!(f, "{}", JsonFormatter::from_ref(e))?;
+            write!(f, "{}", cast::<_, &JsonFormatter<_>>(e))?;
         }
         write!(f, "]")
     }
@@ -124,7 +93,7 @@ where
     JsonFormatter<T>: Display,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", JsonFormatter::from_ref(&*self.0))
+        write!(f, "{}", cast::<_, &JsonFormatter<_>>(&*self.0))
     }
 }
 
@@ -133,7 +102,7 @@ where
     JsonFormatter<T>: Display,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", JsonFormatter::from_ref(&self.0[..]))
+        write!(f, "{}", cast::<_, &JsonFormatter<[_]>>(&self.0[..]))
     }
 }
 
@@ -152,7 +121,7 @@ where
     }
 }
 
-macro_rules! impl_serializer {
+macro_rules! impl_into_response {
     ($Wrapper:ident) => {
         impl<T> IntoResponse for $Wrapper<T>
         where
@@ -168,42 +137,6 @@ macro_rules! impl_serializer {
                 response
             }
         }
-
-        impl<T: ?Sized> Serialize for $Wrapper<Box<T>>
-        where
-            $Wrapper<T>: Serialize,
-        {
-            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                $Wrapper::from_ref(&*self.0).serialize(serializer)
-            }
-        }
-
-        impl<T> Serialize for $Wrapper<[T]>
-        where
-            $Wrapper<T>: Serialize,
-        {
-            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                $Wrapper::from_slice(&self.0).serialize(serializer)
-            }
-        }
-
-        impl<T> Serialize for $Wrapper<Vec<T>>
-        where
-            $Wrapper<T>: Serialize,
-        {
-            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                $Wrapper::from_slice(&self.0[..]).serialize(serializer)
-            }
-        }
     };
 }
 
@@ -213,7 +146,7 @@ wrapper! {
     pub(crate) ProducerApiSerializer;
 }
 
-impl_serializer!(ProducerApiSerializer);
+impl_into_response!(ProducerApiSerializer);
 
 wrapper! {
     /// Helper for serializing structs in admin API format.
@@ -221,4 +154,4 @@ wrapper! {
     pub(crate) ConsumerApiSerializer;
 }
 
-impl_serializer!(ConsumerApiSerializer);
+impl_into_response!(ConsumerApiSerializer);
