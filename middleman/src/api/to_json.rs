@@ -12,7 +12,7 @@ use serde::Serialize;
 /// If `T: Cast<U>`, then T and U must be safely convertible using
 /// `std::mem::transmute` and it must be safe to access aliased `&T` and `&U`
 /// references.
-unsafe trait Cast<T: ?Sized> {}
+pub(crate) unsafe trait Cast<T: ?Sized> {}
 
 unsafe impl<'a, T: ?Sized, U: ?Sized> Cast<&'a U> for &'a T where T: Cast<U> {}
 unsafe impl<'a, T: ?Sized, U: ?Sized> Cast<&'a mut U> for &'a mut T where T: Cast<U> {}
@@ -35,18 +35,14 @@ pub(crate) fn cast_ref<T: ?Sized, U: ?Sized>(val: &T) -> &U
 where
     T: Cast<U>,
 {
-    let new_val = unsafe { (&val as *const &T as *const &U).read() };
-    std::mem::forget(val);
-    new_val
+    unsafe { (&val as *const &T as *const &U).read() }
 }
 
 pub(crate) fn cast_mut<T: ?Sized, U: ?Sized>(val: &mut T) -> &mut U
 where
     T: Cast<U>,
 {
-    let new_val = unsafe { (&val as *const &mut T as *const &mut U).read() };
-    std::mem::forget(val);
-    new_val
+    unsafe { (&val as *const &mut T as *const &mut U).read() }
 }
 
 macro_rules! wrapper {

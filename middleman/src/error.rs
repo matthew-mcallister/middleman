@@ -63,11 +63,11 @@ impl Error {
 
     pub(crate) fn with_cause(
         kind: ErrorKind,
-        string: impl Into<Box<dyn StdError + Send + Sync + 'static>>,
+        cause: impl Into<Box<dyn StdError + Send + Sync + 'static>>,
     ) -> Self {
         Self {
             kind,
-            cause: Some(string.into().into()),
+            cause: Some(cause.into().into()),
         }
     }
 }
@@ -101,6 +101,8 @@ define_errors! {
     hyper_util::client::legacy::connect::dns::InvalidNameError => ErrorKind::InvalidInput,
     regex::Error => ErrorKind::InvalidInput,
     url::ParseError => ErrorKind::InvalidInput,
+    sqlx::Error => ErrorKind::Unexpected,
+    uuid::Error => ErrorKind::InvalidInput,
 }
 
 impl<'a> From<&'a str> for Box<Error> {

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use db::{Db, Transaction};
 use middleman_db as db;
+use tracing::debug;
 
 use crate::config::Config;
 use crate::connection::Http11ConnectionPoolSettings;
@@ -68,6 +69,7 @@ impl Application {
         let event = self.events.create(&mut txn, builder)?;
         self.create_deliveries_for_event(&mut txn, event.id(), &event)?;
         txn.commit()?;
+        debug!(?event, "Created event {}", event.id());
         // TODO: Schedule event to be delivered if queue is not too full
         Ok(event)
     }

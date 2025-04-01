@@ -286,6 +286,7 @@ impl Scheduler {
                 tasks_started_history: Default::default(),
             },
         );
+        debug!(?subscriber, "registered subscriber {}", subscriber.id());
     }
 
     pub fn schedule_all(&self) -> Result<()> {
