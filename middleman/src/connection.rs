@@ -22,7 +22,7 @@ pub trait Connection: Debug + Send + Sync + 'static {}
 
 impl Key for Uuid {}
 
-pub trait ConnectionFactory: Debug {
+pub trait ConnectionFactory: Debug + Send + Sync + 'static {
     type Key: Key;
     type Connection: Connection;
 

@@ -13,7 +13,7 @@ mod scheduler;
 pub mod subscriber;
 #[cfg(test)]
 mod testing;
-mod util;
+pub mod util;
 
 pub use app::Application;
 pub use util::init_logging;

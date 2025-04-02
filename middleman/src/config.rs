@@ -28,14 +28,14 @@ pub fn load_config() -> Result<Box<Config>> {
 }
 
 #[derive(Debug)]
-pub struct IngestionDbOptions<'c> {
+pub struct SqlIngestionOptions<'c> {
     pub url: &'c str,
     pub table: &'c str,
 }
 
 impl Config {
-    pub fn ingestion_db_options(&self) -> Option<IngestionDbOptions> {
-        Some(IngestionDbOptions {
+    pub fn sql_ingestion_options(&self) -> Option<SqlIngestionOptions> {
+        Some(SqlIngestionOptions {
             url: self.ingestion_db_url.as_ref()?,
             table: self.ingestion_db_table.as_ref()?,
         })

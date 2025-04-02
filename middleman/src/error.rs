@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::error::Error as StdError;
 
 use axum::response::IntoResponse;
@@ -139,6 +140,16 @@ impl From<Box<db::Error>> for Box<Error> {
         Box::new(Error {
             kind,
             cause: Some(value.into()),
+        })
+    }
+}
+
+// Conversion for catch_unwind
+impl From<Box<dyn Any + Send + 'static>> for Box<Error> {
+    fn from(_: Box<dyn Any + Send + 'static>) -> Self {
+        Box::new(Error {
+            kind: ErrorKind::Unexpected,
+            cause: Some("unexpected panic".into()),
         })
     }
 }

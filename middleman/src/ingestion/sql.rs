@@ -5,7 +5,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::app::Application;
-use crate::config::IngestionDbOptions;
+use crate::config::SqlIngestionOptions;
 use crate::error::Result;
 use crate::event::EventBuilder;
 
@@ -49,7 +49,7 @@ where
 }
 
 impl SqlIngestor {
-    pub async fn new(app: Arc<Application>, options: IngestionDbOptions<'_>) -> Result<Self> {
+    pub async fn new(app: Arc<Application>, options: SqlIngestionOptions<'_>) -> Result<Self> {
         // TOOD: Probably should parse URI to strip out username/password and log the rest
         info!("connecting to ingestion db...");
         sqlx::any::install_default_drivers();
@@ -63,9 +63,14 @@ impl SqlIngestor {
     }
 
     pub async fn consume_events(&mut self) -> Result<()> {
+        while self.consume_events_batch().await? {}
+        Ok(())
+    }
+
+    /// Returns `true` if there are more events to consume
+    async fn consume_events_batch(&mut self) -> Result<bool> {
         let limit = 100;
 
-        // FIXME: If # events fetched is == limit then loop
         #[rustfmt::skip]
         let events: Vec<Event> = sqlx::query_as(&format!(stringify!(
             select idempotency_key, tag, stream, payload
@@ -77,7 +82,7 @@ impl SqlIngestor {
             .await?;
 
         if events.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         for event in events.iter() {
@@ -107,6 +112,48 @@ impl SqlIngestor {
         }
         q.execute(&mut self.connection).await?;
 
-        Ok(())
+        Ok(events.len() == 100)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use uuid::uuid;
+
+    use crate::testing::TestHarness;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_ingestion() {
+        let mut harness = TestHarness::new();
+        let application = Arc::clone(harness.application());
+
+        let idempotency_key = uuid!("602295f7-0ee3-45fa-bd6e-d48883c8ec25");
+        let tag = uuid!("246baca1-385b-478b-8513-1b727f79ef7d");
+        #[rustfmt::skip]
+        sqlx::query(r"
+            insert into events (idempotency_key, tag, stream, payload)
+            values (?, ?, ?, ?)
+        ")
+            .bind(&idempotency_key.as_bytes()[..])
+            .bind(&tag.as_bytes()[..])
+            .bind("strem")
+            .bind("1234")
+            .execute(harness.sqlite_db().await)
+            .await
+            .unwrap();
+
+        let ingestor = harness.sql_ingestor().await;
+        ingestor.consume_events().await.unwrap();
+
+        let mut txn = application.db.begin_transaction();
+        let event = application
+            .events
+            .get_by_idempotency_key(&mut txn, tag, idempotency_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.stream(), "strem");
+        assert_eq!(event.payload(), "1234");
     }
 }

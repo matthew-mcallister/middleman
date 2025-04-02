@@ -3,8 +3,9 @@ use std::sync::Arc;
 use log::info;
 use middleman::error::Result;
 use middleman::ingestion::sql::SqlIngestor;
+use middleman::util::sleep_until_next_tick;
 use middleman::{init_logging, Application};
-use tracing::warn;
+use tracing::error;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -18,32 +19,32 @@ async fn main() -> Result<()> {
     let app = Arc::new(Application::new(config.clone())?);
     let router = middleman::api::router(Arc::clone(&app));
 
+    let ref_time = tokio::time::Instant::now();
+    let period = 0.2;
+
     tokio::spawn({
         let app = Arc::clone(&app);
         async move {
-            // FIXME: catch panic inside loop
             loop {
+                // TODO maybe? Catch panics. Would require testing.
                 let res = app.schedule_deliveries();
                 if let Err(e) = res {
-                    // XXX: Logging
-                    eprintln!("{}", e);
+                    error!("error scheduling deliveries: {}", e);
                 }
-                // FIXME: Calculate sleep end time at top of loop
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                sleep_until_next_tick(ref_time, period).await;
             }
         }
     });
 
-    if let Some(options) = config.ingestion_db_options() {
+    if let Some(options) = config.sql_ingestion_options() {
         let mut ingestor = SqlIngestor::new(Arc::clone(&app), options).await?;
         tokio::spawn(async move {
             loop {
                 let res = ingestor.consume_events().await;
                 if let Err(e) = res {
-                    warn!("error consuming events: {}", e);
+                    error!("error consuming events: {}", e);
                 }
-                // FIXME: Calculate sleep end time at top of loop
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                sleep_until_next_tick(ref_time, period).await;
             }
         });
     }

@@ -11,16 +11,20 @@ use http::{Request, Response};
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
 
-use crate::config::Config;
+use crate::config::{Config, SqlIngestionOptions};
 use crate::connection::{Connection, ConnectionFactory, Http11ConnectionPool, Key};
 use crate::error::{Error, Result};
+use crate::ingestion::sql::SqlIngestor;
 use crate::Application;
 
 #[derive(Default)]
 pub(crate) struct TestHarness {
     pub(crate) db_dir: Option<tempfile::TempDir>,
-    pub(crate) application: Option<Application>,
+    pub(crate) application: Option<Arc<Application>>,
     pub(crate) connection_pool: Option<Http11ConnectionPool<CompactString, TestConnection>>,
+    pub(crate) sqlite_db_url: Option<String>,
+    pub(crate) sqlite_db: Option<sqlx::SqliteConnection>,
+    pub(crate) sql_ingestor: Option<SqlIngestor>,
 }
 
 impl TestHarness {
@@ -46,7 +50,7 @@ impl TestHarness {
         self.db_dir.as_ref().map(|d| d.path()).unwrap()
     }
 
-    pub fn application(&mut self) -> &mut Application {
+    pub fn application(&mut self) -> &Arc<Application> {
         if self.application.is_some() {
             return self.application.as_mut().unwrap();
         }
@@ -56,10 +60,12 @@ impl TestHarness {
             db_dir,
             host: IpAddr::from_str("127.0.0.1").unwrap(),
             port: Default::default(),
+            ingestion_db_url: None,
+            ingestion_db_table: None,
         });
-        self.application = Some(Application::new(config).unwrap());
+        self.application = Some(Arc::new(Application::new(config).unwrap()));
 
-        self.application.as_mut().unwrap()
+        self.application.as_ref().unwrap()
     }
 
     pub fn connection_pool(&mut self) -> &mut Http11ConnectionPool<CompactString, TestConnection> {
@@ -73,6 +79,59 @@ impl TestHarness {
         );
         self.connection_pool = Some(pool);
         self.connection_pool.as_mut().unwrap()
+    }
+
+    pub fn sqlite_db_url(&mut self) -> &str {
+        if self.sqlite_db_url.is_some() {
+            return self.sqlite_db_url.as_ref().unwrap();
+        }
+
+        let db_dir = self.db_dir();
+        let path = db_dir.join("test.sqlite").to_str().unwrap().to_owned();
+        let url = format!("sqlite://{path}");
+        self.sqlite_db_url = Some(url);
+        self.sqlite_db_url.as_ref().unwrap()
+    }
+
+    pub async fn sqlite_db(&mut self) -> &mut sqlx::SqliteConnection {
+        use sqlx::Connection;
+        if self.sqlite_db.is_some() {
+            return self.sqlite_db.as_mut().unwrap();
+        }
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str(self.sqlite_db_url())
+            .unwrap()
+            .create_if_missing(true);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+
+        #[rustfmt::skip]
+        sqlx::query(r"
+            create table events (
+                idempotency_key blob primary key,
+                tag blob,
+                stream text,
+                payload text
+            )
+        ")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+
+        self.sqlite_db = Some(connection);
+        self.sqlite_db.as_mut().unwrap()
+    }
+
+    pub async fn sql_ingestor(&mut self) -> &mut SqlIngestor {
+        if self.sql_ingestor.is_some() {
+            return self.sql_ingestor.as_mut().unwrap();
+        }
+        let app = Arc::clone(self.application());
+        let url = self.sqlite_db_url();
+        let options = SqlIngestionOptions {
+            url,
+            table: "events",
+        };
+        self.sql_ingestor = Some(SqlIngestor::new(app, options).await.unwrap());
+        self.sql_ingestor.as_mut().unwrap()
     }
 }
 
@@ -130,6 +189,7 @@ impl ConnectionFactory for TestConnectionFactory {
     }
 }
 
+// Used in some http unit test
 pub(crate) async fn http_server<F, S>(f: F) -> Result<(u16, impl Future<Output: Send> + Send)>
 where
     S: Future<Output = Result<Response<String>>> + Send,

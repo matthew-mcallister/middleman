@@ -63,3 +63,6 @@ features = ["full", "test-util", "tracing"]
 [dev-dependencies.axum]
 version = "0.8.1"
 features = ["macros"]
+
+[profile.release]
+panic = 'abort'
