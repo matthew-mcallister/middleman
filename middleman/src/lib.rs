@@ -4,6 +4,7 @@ pub mod config;
 pub mod connection;
 pub mod db;
 pub mod delivery;
+mod delivery_task;
 pub mod error;
 pub mod event;
 mod http;

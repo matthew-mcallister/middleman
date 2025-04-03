@@ -46,6 +46,7 @@ impl TransactionLock {
 }
 
 // Wrapper to handle destructor
+#[derive(Debug)]
 struct Locks {
     db: Arc<Db>,
     keys: Vec<LockKey>,
@@ -63,6 +64,15 @@ impl Drop for Locks {
 pub struct Transaction {
     locks: Locks,
     write_batch: rocksdb::WriteBatchWithTransaction<true>,
+}
+
+impl std::fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transaction")
+            .field("locks", &self.locks)
+            .field("write_batch", &"..")
+            .finish()
+    }
 }
 
 impl Transaction {

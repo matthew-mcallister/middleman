@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use log::info;
 use middleman::error::Result;
 use middleman::ingestion::sql::SqlIngestor;
 use middleman::util::sleep_until_next_tick;
 use middleman::{init_logging, Application};
-use tracing::error;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {

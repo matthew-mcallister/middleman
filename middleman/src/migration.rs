@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use db::{Db, DbOptions};
-use log::info;
 use middleman_db as db;
+use tracing::info;
 
 use crate::db::ColumnFamilyName;
 use crate::error::{Error, Result};

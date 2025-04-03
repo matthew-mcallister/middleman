@@ -1388,7 +1388,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "log",
  "middleman_db",
  "middleman_macros",
  "owning_ref",

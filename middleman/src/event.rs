@@ -95,7 +95,7 @@ impl Display for JsonFormatter<ConsumerApiSerializer<Event>> {
 pub struct EventBuilder<'a> {
     idempotency_key: Option<Uuid>,
     tag: Option<Uuid>,
-    stream: Option<&'a str>,
+    stream: Option<Cow<'a, str>>,
     payload: Option<Cow<'a, str>>,
 }
 
@@ -114,8 +114,8 @@ impl<'a> EventBuilder<'a> {
         self
     }
 
-    pub fn stream(&mut self, stream: &'a str) -> &mut Self {
-        self.stream = Some(stream);
+    pub fn stream(&mut self, stream: impl Into<Cow<'a, str>>) -> &mut Self {
+        self.stream = Some(stream.into());
         self
     }
 
@@ -132,7 +132,7 @@ impl<'a> EventBuilder<'a> {
                 id,
                 _reserved: [0; 2],
             },
-            self.stream.unwrap(),
+            &*self.stream.take().unwrap(),
             &*self.payload.take().unwrap(),
         )
     }

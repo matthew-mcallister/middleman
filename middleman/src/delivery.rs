@@ -4,12 +4,12 @@ use chrono::{Datelike, Timelike, Utc};
 use db::bytes::AsBytes;
 use db::key::Packed2;
 use db::{Accessor, ColumnFamily, ColumnFamilyDescriptor, Db, Transaction};
-use log::debug;
 use middleman_db::key::{BigEndianU32, BigEndianU64};
 use middleman_db::prefix::IsPrefixOf;
 use middleman_db::{self as db, packed, Cursor};
 use middleman_macros::db_key;
 use rand::Rng;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::db::ColumnFamilyName;

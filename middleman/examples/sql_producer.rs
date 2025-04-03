@@ -1,11 +1,14 @@
+use std::str::FromStr;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
+use middleman::ingestion::sql::Flavor;
 use rand::Rng;
 use sqlx::pool::PoolConnection;
 use sqlx::{AnyPool, Executor};
 use statrs::distribution::{Chi, ContinuousCDF, DiscreteCDF, Geometric};
 use tracing::info;
+use url::Url;
 use uuid::{uuid, Uuid};
 
 type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -33,29 +36,66 @@ struct RunArgs {
 
 #[derive(Debug)]
 struct Common {
-    pool: AnyPool,
+    db_url: Url,
+    _pool: AnyPool,
     connection: PoolConnection<sqlx::Any>,
 }
 
 impl Common {
     async fn new() -> Result<Self> {
-        let database_uri = std::env::var("MIDDLEMAN_INGESTION_DB_URL").unwrap();
-        let pool = AnyPool::connect(&database_uri).await?;
+        let db_url = std::env::var("MIDDLEMAN_INGESTION_DB_URL").unwrap();
+        let pool = AnyPool::connect(&db_url).await?;
+        let db_url = Url::parse(&db_url).unwrap();
         let connection = pool.acquire().await?;
-        Ok(Self { pool, connection })
+        Ok(Self {
+            db_url,
+            _pool: pool,
+            connection,
+        })
+    }
+
+    fn flavor(&self) -> Result<Flavor> {
+        Ok(Flavor::from_str(self.db_url.scheme())?)
+    }
+}
+
+fn insert_query(flavor: Flavor) -> &'static str {
+    match flavor {
+        Flavor::Mysql => stringify!(
+            insert into events (idempotency_key, tag, stream, payload)
+            values (?, ?, ?, ?)
+        ),
+        Flavor::Postgresql => concat!(
+            "insert into events (idempotency_key, tag, stream, payload) values ",
+            "(cast(encode($1, 'hex') as uuid), cast(encode($2, 'hex') as uuid), $3, $4)",
+        ),
     }
 }
 
 async fn init_db(mut com: Common) -> Result<()> {
     #[rustfmt::skip]
-    com.connection.execute(r"
-        create table events (
-            idempotency_key blob primary key,
-            tag blob,
-            stream text,
-            payload text
-        )
-    ").await?;
+    match com.flavor()? {
+        Flavor::Mysql => {
+            com.connection.execute(stringify!(
+                create table events (
+                    idempotency_key blob primary key,
+                    tag blob,
+                    stream text,
+                    payload text
+                )
+            )).await?;
+        },
+        Flavor::Postgresql => {
+            com.connection.execute(stringify!(
+                create table events (
+                    idempotency_key uuid primary key,
+                    tag uuid,
+                    stream text,
+                    payload text
+                )
+            )).await?;
+        },
+    };
     Ok(())
 }
 
@@ -67,6 +107,7 @@ async fn run(mut com: Common, args: &RunArgs) -> Result<()> {
     let tag = uuid!("8d51a639-1d2f-46a4-9fdd-7730860b1990");
 
     let user_id_dist = Geometric::new(10e-3)?;
+    let flavor = Flavor::from_str(com.db_url.scheme())?;
 
     loop {
         let idempotency_key = Uuid::new_v4();
@@ -74,10 +115,7 @@ async fn run(mut com: Common, args: &RunArgs) -> Result<()> {
         let stream = format!("user:{}", user_id);
         let payload = format!("{{\"data\":{}}}", rng.random::<u16>());
         #[rustfmt::skip]
-        sqlx::query::<sqlx::Any>(r"
-            insert into events (idempotency_key, tag, stream, payload)
-            values (?, ?, ?, ?)
-        ")
+        sqlx::query::<sqlx::Any>(insert_query(flavor))
             .bind(&idempotency_key.as_bytes()[..])
             .bind(&tag.as_bytes()[..])
             .bind(stream)

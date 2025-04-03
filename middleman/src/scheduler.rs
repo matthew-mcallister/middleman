@@ -1,24 +1,18 @@
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use dashmap::DashMap;
-use http::{HeaderValue, Request};
 use middleman_db::{Db, Transaction};
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::api::to_json::{cast, ConsumerApiSerializer, JsonFormatter};
-use crate::delivery::{Delivery, DeliveryTable};
-use crate::error::{Error, ErrorKind, Result};
-use crate::event::{Event, EventTable};
-use crate::http::{timestamp_and_sign_request, SubscriberConnectionPool};
+use crate::delivery::DeliveryTable;
+use crate::delivery_task::DeliveryTask;
+use crate::error::Result;
+use crate::event::EventTable;
+use crate::http::SubscriberConnectionPool;
 use crate::subscriber::{Subscriber, SubscriberTable};
-
-fn between(x: u16, min: u16, max: u16) -> bool {
-    x >= min && x < max
-}
 
 #[derive(Clone, Copy, Debug)]
 struct RingBuffer<T, const N: usize> {
@@ -60,97 +54,20 @@ impl<T, const N: usize> RingBuffer<T, N> {
 }
 
 #[derive(Debug)]
-struct TaskShared {
-    db: Arc<Db>,
-    subscriber_id: Uuid,
-    stats: Stats,
-    subscribers: Arc<SubscriberTable>,
-    events: Arc<EventTable>,
-    deliveries: Arc<DeliveryTable>,
-    connections: Arc<SubscriberConnectionPool>,
-}
-
-struct Task {
-    shared: Arc<TaskShared>,
-    transaction: Transaction,
-    subscriber: Box<Subscriber>,
-    delivery: Delivery,
-    event: Box<Event>,
-}
-
-impl Task {
-    fn new(
-        shared: Arc<TaskShared>,
-        transaction: Transaction,
-        subscriber_id: Uuid,
-        event_id: u64,
-    ) -> Result<Self> {
-        let subscriber = shared.subscribers.get(subscriber_id)?.ok_or(ErrorKind::Unexpected)?;
-        let event = shared.events.get(subscriber.tag(), event_id)?.ok_or(ErrorKind::Unexpected)?;
-        let delivery =
-            shared.deliveries.get(subscriber_id, event_id)?.ok_or(ErrorKind::Unexpected)?;
-        Ok(Self {
-            shared,
-            transaction,
-            subscriber,
-            delivery,
-            event,
-        })
-    }
-
-    async fn run(mut self) -> Result<()> {
-        debug!(
-            "delivering event {} to subscriber {} attempt {}",
-            self.delivery.event_id(),
-            self.delivery.subscriber_id(),
-            self.delivery.attempts_made() + 1,
-        );
-
-        let subscriber_id = self.delivery.subscriber_id();
-        let mut txn = self.transaction;
-
-        let body = cast::<_, &JsonFormatter<_>>(cast::<_, &ConsumerApiSerializer<_>>(&*self.event));
-        let mut request = Request::new(body.to_string());
-        *request.method_mut() = http::Method::POST;
-        request.headers_mut().insert(
-            "Content-Type",
-            HeaderValue::from_str("application/json").unwrap(),
-        );
-        let timestamp: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
-        timestamp_and_sign_request(timestamp.into(), self.subscriber.hmac_key(), &mut request);
-
-        let connection = self.shared.connections.connect(&subscriber_id).await;
-        // Mark the task as started whether or not the connection succeeded
-        self.shared.stats.tasks_started_last_tick.fetch_add(1, Ordering::Acquire);
-
-        let response = match connection {
-            Ok(mut connection) => connection.send_request(request).await,
-            Err(e) => Err(e),
-        };
-        match response {
-            Ok(response) if between(u16::from(response.status()), 200, 300) => {
-                self.shared.deliveries.delete(&mut txn, &mut self.delivery);
-            },
-            // TODO: Handle 300
-            Err(e) => {
-                debug!(delivery = ?self.delivery, "delivery failed: {}", e);
-                self.shared.deliveries.update_for_next_attempt(&mut txn, &mut self.delivery);
-            },
-            _ => {
-                self.shared.deliveries.update_for_next_attempt(&mut txn, &mut self.delivery);
-            },
-        }
-
-        txn.commit()?;
-
-        Ok::<(), Box<Error>>(())
-    }
+pub(crate) struct TaskShared {
+    pub(crate) db: Arc<Db>,
+    pub(crate) subscriber_id: Uuid,
+    pub(crate) stats: Stats,
+    pub(crate) subscribers: Arc<SubscriberTable>,
+    pub(crate) events: Arc<EventTable>,
+    pub(crate) deliveries: Arc<DeliveryTable>,
+    pub(crate) connections: Arc<SubscriberConnectionPool>,
 }
 
 #[derive(Debug, Default)]
-struct Stats {
-    queued_tasks: AtomicU32,
-    tasks_started_last_tick: AtomicU32,
+pub(crate) struct Stats {
+    pub(crate) queued_tasks: AtomicU32,
+    pub(crate) tasks_started_last_tick: AtomicU32,
 }
 
 #[derive(Debug)]
@@ -210,7 +127,7 @@ impl UnitScheduler {
         let shared = Arc::clone(&self.shared);
         shared.stats.queued_tasks.fetch_add(1, Ordering::Acquire);
 
-        let task = Task::new(shared, transaction, subscriber_id, event_id)?;
+        let task = DeliveryTask::new(shared, transaction, subscriber_id, event_id)?;
         tokio::spawn(task.run());
         Ok(())
     }
