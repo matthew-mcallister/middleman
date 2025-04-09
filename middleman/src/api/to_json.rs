@@ -109,10 +109,9 @@ where
     fn into_response(self) -> Response {
         let body = self.to_string();
         let mut response = Response::new(Body::new(body));
-        response.headers_mut().insert(
-            "Content-Type",
-            HeaderValue::from_str("application/json").unwrap(),
-        );
+        response
+            .headers_mut()
+            .insert("Content-Type", HeaderValue::from_str("application/json").unwrap());
         response
     }
 }
@@ -126,10 +125,9 @@ macro_rules! impl_into_response {
             fn into_response(self) -> Response<Body> {
                 let body = serde_json::to_string(&self).unwrap();
                 let mut response = Response::new(Body::new(body));
-                response.headers_mut().insert(
-                    "Content-Type",
-                    HeaderValue::from_str("application/json").unwrap(),
-                );
+                response
+                    .headers_mut()
+                    .insert("Content-Type", HeaderValue::from_str("application/json").unwrap());
                 response
             }
         }

@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 
-use crate::{FromBytesError, TryFromBytesError};
+use crate::FromBytesError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Layout {
@@ -43,7 +43,13 @@ impl DestructuredPointer for (usize, usize) {
     }
 }
 
-pub trait HasLayout {
+/// # Safety
+///
+/// While implementing this trait cannot directly lead to undefined behavior,
+/// the derive macros for `FromBytes` and `IntoBytes` are safe, yet they will
+/// generate incorrect code if a type's `HasLayout` implementation is
+/// incorrect.
+pub unsafe trait HasLayout {
     type DestructuredPointer: DestructuredPointer;
 
     const LAYOUT: Layout;
@@ -121,7 +127,7 @@ pub const fn compute_layout(fields: &[Layout]) -> Layout {
     }
 }
 
-const fn validate_size(layout: &Layout, size: usize) -> Result<usize, FromBytesError> {
+pub(crate) const fn validate_size(layout: &Layout, size: usize) -> Result<usize, FromBytesError> {
     if size % layout.alignment.get() != 0 || size < layout.size {
         return Err(FromBytesError::InvalidSize);
     }
@@ -141,11 +147,11 @@ const fn validate_size(layout: &Layout, size: usize) -> Result<usize, FromBytesE
 
 pub fn destructured_pointer_from_bytes<T: HasLayout + ?Sized>(
     bytes: &[u8],
-) -> Result<T::DestructuredPointer, crate::TryFromBytesError> {
+) -> Result<T::DestructuredPointer, crate::FromBytesError> {
     let address = bytes.as_ptr() as usize;
     let layout = &T::LAYOUT;
     if address % layout.alignment != 0 {
-        return Err(TryFromBytesError::InvalidAlignment);
+        return Err(FromBytesError::InvalidAlignment);
     }
     let len = validate_size(layout, bytes.len())?;
     Ok(T::DestructuredPointer::from_address_and_len(address, len))
@@ -171,7 +177,7 @@ macro_rules! has_layout_primitive {
         has_layout_primitive!($Type; @trap true);
     };
     ($Type:ty; @trap $trap:expr) => {
-        impl HasLayout for $Type {
+        unsafe impl HasLayout for $Type {
             type DestructuredPointer = usize;
 
             const LAYOUT: Layout = Layout {
@@ -199,7 +205,7 @@ has_layout_primitive!(i128);
 has_layout_primitive!(isize);
 has_layout_primitive!(bool; @trap);
 
-impl<const N: usize, T: HasLayout> HasLayout for [T; N] {
+unsafe impl<const N: usize, T: HasLayout> HasLayout for [T; N] {
     type DestructuredPointer = usize;
 
     const LAYOUT: Layout = Layout {
@@ -211,7 +217,7 @@ impl<const N: usize, T: HasLayout> HasLayout for [T; N] {
     };
 }
 
-impl<T: HasLayout> HasLayout for [T] {
+unsafe impl<T: HasLayout> HasLayout for [T] {
     type DestructuredPointer = (usize, usize);
 
     const LAYOUT: Layout = Layout {
@@ -223,7 +229,7 @@ impl<T: HasLayout> HasLayout for [T] {
     };
 }
 
-impl HasLayout for () {
+unsafe impl HasLayout for () {
     type DestructuredPointer = usize;
 
     const LAYOUT: Layout = Layout {
@@ -235,44 +241,67 @@ impl HasLayout for () {
     };
 }
 
-impl<T1: HasLayout, T2: HasLayout> HasLayout for (T1, T2) {
-    type DestructuredPointer = usize;
+macro_rules! impl_has_layout_tuple {
+    ($($Tn:ident),*) => {
+        unsafe impl<$($Tn: HasLayout,)*> HasLayout for ($($Tn,)*) {
+            type DestructuredPointer = usize;
 
-    const LAYOUT: Layout = compute_layout(&[T1::LAYOUT, T2::LAYOUT]);
+            const LAYOUT: Layout = compute_layout(&[$($Tn::LAYOUT,)*]);
+        }
+    };
 }
 
-impl<T1: HasLayout, T2: HasLayout, T3: HasLayout> HasLayout for (T1, T2, T3) {
-    type DestructuredPointer = usize;
+impl_has_layout_tuple!(T1, T2);
+impl_has_layout_tuple!(T1, T2, T3);
+impl_has_layout_tuple!(T1, T2, T3, T4);
+impl_has_layout_tuple!(T1, T2, T3, T4, T5);
+impl_has_layout_tuple!(T1, T2, T3, T4, T5, T6);
 
-    const LAYOUT: Layout = compute_layout(&[T1::LAYOUT, T2::LAYOUT, T3::LAYOUT]);
-}
+#[cfg(test)]
+mod tests {
+    use crate::layout::{HasLayout, compute_layout};
 
-impl<T1: HasLayout, T2: HasLayout, T3: HasLayout, T4: HasLayout> HasLayout for (T1, T2, T3, T4) {
-    type DestructuredPointer = usize;
+    #[test]
+    fn test_layout_with_padding() {
+        let layout = compute_layout(&[u32::LAYOUT, u16::LAYOUT, u32::LAYOUT]);
+        assert_eq!(layout.size, 12);
+        assert_eq!(layout.alignment.get(), 4);
+        assert_eq!(layout.has_trap_values, false);
+        assert_eq!(layout.has_padding, true);
+        assert_eq!(layout.tail_stride, 0);
+    }
 
-    const LAYOUT: Layout = compute_layout(&[T1::LAYOUT, T2::LAYOUT, T3::LAYOUT, T4::LAYOUT]);
-}
+    #[test]
+    fn test_layout_with_trap() {
+        let layout = compute_layout(&[bool::LAYOUT]);
+        assert_eq!(layout.size, 1);
+        assert_eq!(layout.alignment.get(), 1);
+        assert_eq!(layout.has_trap_values, true);
+        assert_eq!(layout.has_padding, false);
+        assert_eq!(layout.tail_stride, 0);
+    }
 
-impl<T1: HasLayout, T2: HasLayout, T3: HasLayout, T4: HasLayout, T5: HasLayout> HasLayout
-    for (T1, T2, T3, T4, T5)
-{
-    type DestructuredPointer = usize;
+    #[test]
+    fn test_slice_dst_layout() {
+        let layout = compute_layout(&[u32::LAYOUT, u16::LAYOUT, <[u8]>::LAYOUT]);
+        assert_eq!(layout.size, 6);
+        assert_eq!(layout.alignment.get(), 4);
+        assert_eq!(layout.has_trap_values, false);
+        assert_eq!(layout.has_padding, false);
+        assert_eq!(layout.tail_stride, 1);
 
-    const LAYOUT: Layout =
-        compute_layout(&[T1::LAYOUT, T2::LAYOUT, T3::LAYOUT, T4::LAYOUT, T5::LAYOUT]);
-}
+        let layout = compute_layout(&[u32::LAYOUT, u16::LAYOUT, <[u64]>::LAYOUT]);
+        assert_eq!(layout.size, 8);
+        assert_eq!(layout.alignment.get(), 8);
+        assert_eq!(layout.has_trap_values, false);
+        assert_eq!(layout.has_padding, true);
+        assert_eq!(layout.tail_stride, 8);
+    }
 
-impl<T1: HasLayout, T2: HasLayout, T3: HasLayout, T4: HasLayout, T5: HasLayout, T6: HasLayout>
-    HasLayout for (T1, T2, T3, T4, T5, T6)
-{
-    type DestructuredPointer = usize;
-
-    const LAYOUT: Layout = compute_layout(&[
-        T1::LAYOUT,
-        T2::LAYOUT,
-        T3::LAYOUT,
-        T4::LAYOUT,
-        T5::LAYOUT,
-        T6::LAYOUT,
-    ]);
+    #[test]
+    fn test_transparent_layout() {
+        let layout1 = compute_layout(&[u32::LAYOUT, u16::LAYOUT, u32::LAYOUT]);
+        let layout2 = compute_layout(&[layout1]);
+        assert_eq!(layout1, layout2);
+    }
 }

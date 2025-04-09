@@ -1,4 +1,9 @@
-use crate::bytes::AsBytes;
+//! Implements some helpers for working with key data.
+
+use bytecast::layout::{HasLayout, Layout};
+use bytecast::{FromBytes, IntoBytes};
+use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+
 use crate::prefix::IsPrefixOf;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12,60 +17,12 @@ impl std::fmt::Display for StringOverflowError {
 
 impl std::error::Error for StringOverflowError {}
 
-// This byte is not allowed by UTF-8 because it begins a two-byte sequence that
-// is out of the valid codepoint range (0x80-0x7ff).
-const UTF8_INVALID_BYTE: u8 = 0xc0;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct FiniteString<const N: usize> {
-    bytes: [u8; N],
-}
-
-impl<const N: usize> FiniteString<N> {
-    pub fn as_bytes(&self) -> &[u8; N] {
-        &self.bytes
-    }
-}
-
-impl<const N: usize> AsRef<[u8; N]> for FiniteString<N> {
-    fn as_ref(&self) -> &[u8; N] {
-        &self.bytes
-    }
-}
-
-impl<const N: usize> AsRef<str> for FiniteString<N> {
-    fn as_ref(&self) -> &str {
-        let len = match self.bytes.iter().position(|&c| c == UTF8_INVALID_BYTE) {
-            Some(n) => n,
-            None => N,
-        };
-        let ptr = self.bytes.as_ptr();
-        unsafe {
-            let bytes: &[u8] = std::slice::from_raw_parts(ptr, len);
-            std::str::from_utf8_unchecked(bytes)
-        }
-    }
-}
-
-impl<'s, const N: usize> TryFrom<&'s str> for FiniteString<N> {
-    type Error = StringOverflowError;
-
-    fn try_from(value: &'s str) -> Result<Self, Self::Error> {
-        if value.len() > N {
-            Err(StringOverflowError)
-        } else {
-            let mut bytes = [UTF8_INVALID_BYTE; N];
-            bytes[..value.len()].copy_from_slice(value.as_bytes());
-            Ok(Self { bytes })
-        }
-    }
-}
-
-unsafe impl<const N: usize> AsBytes for FiniteString<N> {}
-
 macro_rules! big_endian_int {
     ($BeInt:ident, $Int:ty) => {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[derive(
+            Clone, Copy, Debug, Eq, FromBytes, HasLayout, IntoBytes, Ord, PartialEq, PartialOrd,
+        )]
+        #[repr(C)]
         pub struct $BeInt([u8; std::mem::size_of::<$Int>()]);
         impl From<$Int> for $BeInt {
             fn from(value: $Int) -> $BeInt {
@@ -92,7 +49,6 @@ macro_rules! big_endian_int {
                 &self.0
             }
         }
-        unsafe impl AsBytes for $BeInt {}
     };
 }
 
@@ -105,7 +61,7 @@ big_endian_int!(BigEndianI64, i64);
 
 macro_rules! impl_packed_tuple {
     ($PackedN:ident, $($T:ident),*$(,)?) => {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
         #[repr(packed)]
         pub struct $PackedN<$($T,)*>($(pub $T,)*);
 
@@ -123,7 +79,38 @@ macro_rules! impl_packed_tuple {
             }
         }
 
-        unsafe impl<$($T: AsBytes,)*> AsBytes for $PackedN<$($T,)*> {}
+        unsafe impl<$($T: HasLayout,)*> HasLayout for $PackedN<$($T,)*> {
+            type DestructuredPointer = usize;
+
+            const LAYOUT: Layout = bytecast::layout::compute_layout_packed(&[$(<$T as HasLayout>::LAYOUT,)*]);
+        }
+
+        impl<$($T: HasLayout + FromBytes,)*> FromBytes for $PackedN<$($T,)*> {
+            fn ref_from_bytes(bytes: &[u8]) -> Result<&Self, bytecast::FromBytesError> {
+                let destructured = bytecast::layout::destructured_pointer_from_bytes::<Self>(bytes)?;
+                unsafe {
+                    let ptr: *const Self = std::mem::transmute(destructured);
+                    Ok(&*ptr)
+                }
+            }
+
+            fn mut_from_bytes(bytes: &mut [u8]) -> Result<&mut Self, bytecast::FromBytesError> {
+                let destructured = bytecast::layout::destructured_pointer_from_bytes::<Self>(bytes)?;
+                unsafe {
+                    let ptr: *mut Self = std::mem::transmute(destructured);
+                    Ok(&mut *ptr)
+                }
+            }
+        }
+
+        impl<$($T: HasLayout + IntoBytes,)*> IntoBytes for $PackedN<$($T,)*> {
+            fn as_bytes(&self) -> &[u8] {
+                unsafe {
+                    let destructured: <Self as ::bytecast::layout::HasLayout>::DestructuredPointer = std::mem::transmute(self);
+                    &*::bytecast::layout::bytes_from_destructured_pointer::<Self>(destructured)
+                }
+            }
+        }
     };
 }
 
@@ -159,9 +146,9 @@ pub use packed;
 
 macro_rules! impl_bytes_as_prefix_of_packed_tuple {
     ($PackedN:ident<$($T:ident),*>) => {
-        impl<$($T: AsBytes),*> IsPrefixOf<$PackedN<$($T),*>> for [u8] {
+        impl<$($T: HasLayout + IntoBytes),*> IsPrefixOf<$PackedN<$($T),*>> for [u8] {
             fn is_prefix_of(&self, other: &$PackedN<$($T),*>) -> bool {
-                self.is_prefix_of(AsBytes::as_bytes(other))
+                self.is_prefix_of(IntoBytes::as_bytes(other))
             }
         }
     };
@@ -173,119 +160,41 @@ impl_bytes_as_prefix_of_packed_tuple!(Packed4<T, U, V, W>);
 impl_bytes_as_prefix_of_packed_tuple!(Packed5<T, U, V, W, X>);
 impl_bytes_as_prefix_of_packed_tuple!(Packed6<T, U, V, W, X, Y>);
 
-// Implements some boilerplate
-#[macro_export]
-macro_rules! dst_key {
-    (
-        $(#[$($meta:tt)*])*
-        struct $Name:ident {
-            $($field:ident: $FieldTy:ty,)*
-            // The brackets here resolve an ambiguous parse
-            [$tail:ident]: $TailTy:ty$(,)?
-        }
-    ) => {
-        $(#[$($meta)*])*
-        #[repr(packed)]
-        struct $Name {
-            $($field: $FieldTy,)*
-            _tail_start: [u8; 0],
-            $tail: $TailTy,
-        }
-
-        unsafe impl $crate::bytes::AsBytes for $Name {
-            fn as_bytes(this: &Self) -> &[u8] {
-                let start = this as *const Self as *const u8;
-                let tail = $crate::bytes::AsBytes::as_bytes(&this.$tail);
-                let end = tail.as_ptr_range().end;
-                unsafe {
-                    let len = end.offset_from(start);
-                    std::mem::transmute((start, len))
-                }
-            }
-        }
-
-        impl $crate::bytes::AsRawBytes for $Name {
-            fn as_raw_bytes(&self) -> &[std::mem::MaybeUninit<u8>] {
-                unsafe { std::mem::transmute($crate::bytes::AsBytes::as_bytes(self)) }
-            }
-        }
-
-        impl $Name {
-            fn new($($field: $FieldTy,)* $tail: &$TailTy) -> Box<Self> {
-                let mut bytes = Vec::with_capacity(std::mem::size_of::<Uuid>() + $tail.len());
-                $(bytes.extend_from_slice($crate::bytes::AsBytes::as_bytes(&$field));)*
-                bytes.extend_from_slice($crate::bytes::AsBytes::as_bytes($tail));
-                unsafe { Self::box_from_bytes_unchecked(bytes) }
-            }
-        }
-
-        impl $crate::bytes::FromBytesUnchecked for $Name {
-            unsafe fn ref_from_bytes_unchecked(bytes: &[u8]) -> &Self {
-                assert!(bytes.len() >= std::mem::offset_of!(Self, _tail_start));
-                let len = bytes.len() - std::mem::offset_of!(Self, _tail_start);
-                let ptr = bytes.as_ptr();
-                unsafe { std::mem::transmute((ptr, len)) }
-            }
-
-            unsafe fn mut_from_bytes_unchecked(bytes: &mut [u8]) -> &mut Self {
-                assert!(bytes.len() >= std::mem::offset_of!(Self, _tail_start));
-                let len = bytes.len() - std::mem::offset_of!(Self, _tail_start);
-                let ptr = bytes.as_mut_ptr();
-                unsafe { std::mem::transmute((ptr, len)) }
-            }
-        }
-
-        impl ToOwned for $Name {
-            type Owned = Box<Self>;
-
-            fn to_owned(&self) -> Self::Owned {
-                let src = $crate::bytes::AsBytes::as_bytes(self);
-                unsafe { <Self as $crate::bytes::FromBytesUnchecked>::box_from_bytes_unchecked(src.to_owned()) }
-            }
-        }
-    };
-}
-
-pub use dst_key;
-
 #[cfg(test)]
 mod tests {
-    use crate::bytes::{AsBytes, FromBytesUnchecked};
+    use bytecast::{FromBytes, IntoBytes};
+    use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
 
     use super::*;
 
     #[test]
-    fn test_key_macro() {
+    fn test_key() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq, FromBytes, HasLayout, IntoBytes)]
         #[repr(packed)]
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         struct MyKey {
             a: BigEndianU16,
-            b: FiniteString<4>,
+            b: Packed4<u8, u8, u8, u8>,
             c: BigEndianU16,
         }
 
-        unsafe impl AsBytes for MyKey {}
-
         let key = MyKey {
             a: 1.into(),
-            b: FiniteString::try_from("blah").unwrap(),
+            b: packed!('b' as _, 'l' as _, 'a' as _, 'h' as _),
             c: 2.into(),
         };
         let bytes: [u8; 8] = [0, 1, 'b' as _, 'l' as _, 'a' as _, 'h' as _, 0, 2];
         assert_eq!(MyKey::as_bytes(&key), bytes);
-        unsafe {
-            assert_eq!(*MyKey::ref_from_bytes_unchecked(&bytes), key);
-        }
+        assert_eq!(*MyKey::ref_from_bytes(&bytes).unwrap(), key);
     }
 
     #[test]
     fn test_packed_prefix() {
         let tuple = Packed3(1u32, 2u32, 3u32);
         assert!(1u32.to_ne_bytes().is_prefix_of(&tuple));
-        assert!(AsBytes::as_bytes(&Packed2(1u32, 2u32)).is_prefix_of(&tuple));
-        assert!(AsBytes::as_bytes(&tuple).is_prefix_of(&tuple));
+        assert!(Packed2(1u32, 2u32).as_bytes().is_prefix_of(&tuple));
+        assert!(tuple.as_bytes().is_prefix_of(&tuple));
         assert!(!2u32.to_ne_bytes().is_prefix_of(&tuple));
-        assert!(!AsBytes::as_bytes(&Packed3(1u32, 2u32, 4u32)).is_prefix_of(&tuple));
-        assert!(!AsBytes::as_bytes(&Packed3(2u32, 2u32, 3u32)).is_prefix_of(&tuple));
+        assert!(!Packed3(1u32, 2u32, 4u32).as_bytes().is_prefix_of(&tuple));
+        assert!(!Packed3(2u32, 2u32, 3u32).as_bytes().is_prefix_of(&tuple));
     }
 }

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
+use bytecast::{FromBytes, IntoBytes};
+use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
 use chrono::{Datelike, Timelike, Utc};
-use db::bytes::AsBytes;
-use db::key::Packed2;
-use db::{Accessor, ColumnFamily, ColumnFamilyDescriptor, Db, Transaction};
-use middleman_db::key::{BigEndianU32, BigEndianU64};
+use middleman_db::key::{BigEndianU32, BigEndianU64, Packed2};
 use middleman_db::prefix::IsPrefixOf;
-use middleman_db::{self as db, packed, Cursor};
-use middleman_macros::db_key;
+use middleman_db::{
+    packed, Accessor, ColumnFamily, ColumnFamilyDescriptor, Cursor, Db, Transaction,
+};
 use rand::Rng;
 use tracing::debug;
 use uuid::Uuid;
@@ -28,7 +28,7 @@ fn next_attempt_delay(last_attempt: u32) -> chrono::TimeDelta {
 }
 
 // UTC datetime with stable binary representation.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, FromBytes, HasLayout, IntoBytes, Ord, PartialEq, PartialOrd)]
 #[repr(C)]
 pub struct DateTime {
     yof: u32,
@@ -71,21 +71,19 @@ impl From<chrono::DateTime<Utc>> for DateTime {
 }
 
 /// Delivery of a single event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, FromBytes, HasLayout, IntoBytes, PartialEq, Eq)]
 #[repr(C)]
 pub struct Delivery {
-    subscriber_id: Uuid,
+    subscriber_id: [u8; 16],
     event_id: u64,
     _reserved: [u64; 2],
     next_attempt: DateTime,
     attempts_made: u32,
 }
 
-unsafe impl AsBytes for Delivery {}
-
 impl Delivery {
     pub(crate) fn subscriber_id(&self) -> Uuid {
-        self.subscriber_id
+        Uuid::from_bytes(self.subscriber_id)
     }
 
     pub(crate) fn event_id(&self) -> u64 {
@@ -117,14 +115,15 @@ pub struct DeliveryTable {
     next_attempt_index: ColumnFamily,
 }
 
-type DeliveryKey = Packed2<BigEndianU64, Uuid>;
+type DeliveryKey = Packed2<BigEndianU64, [u8; 16]>;
 
 // TODO: Add a global next attempt index with the subscriber as suffix rather
 // than prefix. Then support both "fast scan" over all subscribers and "fair
 // scan" done per-subscriber.
-#[db_key]
+#[derive(Clone, Copy, Debug, Eq, FromBytes, HasLayout, IntoBytes, Ord, PartialEq, PartialOrd)]
+#[repr(C)]
 pub(crate) struct NextAttemptKey {
-    subscriber_id: Uuid,
+    subscriber_id: [u8; 16],
     yof: BigEndianU32,
     seconds: BigEndianU32,
     nanos: BigEndianU32,
@@ -132,6 +131,10 @@ pub(crate) struct NextAttemptKey {
 }
 
 impl NextAttemptKey {
+    fn subscriber_id(&self) -> Uuid {
+        Uuid::from_bytes(self.subscriber_id)
+    }
+
     fn timestamp(&self) -> DateTime {
         DateTime {
             yof: self.yof.into(),
@@ -141,7 +144,7 @@ impl NextAttemptKey {
     }
 }
 
-impl IsPrefixOf<NextAttemptKey> for Uuid {
+impl IsPrefixOf<NextAttemptKey> for [u8; 16] {
     fn is_prefix_of(&self, other: &NextAttemptKey) -> bool {
         *self == other.subscriber_id
     }
@@ -178,30 +181,28 @@ impl DeliveryTable {
     ) -> Delivery {
         let next_attempt = Utc::now().into();
         let delivery = Delivery {
-            subscriber_id,
+            subscriber_id: subscriber_id.into_bytes(),
             event_id,
             attempts_made: 0,
             next_attempt,
             _reserved: [0; 2],
         };
-        self.accessor().put_txn(txn, &packed!(event_id.into(), subscriber_id), &delivery);
+        self.accessor().put_txn(
+            txn,
+            &packed!(event_id.into(), subscriber_id.into_bytes()),
+            &delivery,
+        );
         let index_key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().put_txn(txn, &index_key, &());
         delivery
     }
 
     pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> Result<Option<Delivery>> {
-        unsafe {
-            Ok(
-                self.accessor()
-                    .get_unchecked(&(event_id.into(), subscriber_id).into())?
-                    .map(|x| *x),
-            )
-        }
+        Ok(self.accessor().get(&(event_id.into(), subscriber_id.into_bytes()).into())?.map(|x| *x))
     }
 
-    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = db::Result<Delivery>> + 'a {
-        let mut cursor = unsafe { self.accessor().cursor_unchecked() };
+    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = Result<Delivery>> + 'a {
+        let mut cursor = self.accessor().cursor();
         cursor.seek_to_first();
         cursor.values().map(|r| r.map_err(Into::into))
     }
@@ -211,43 +212,43 @@ impl DeliveryTable {
         subscriber_id: Uuid,
         max_time: chrono::DateTime<chrono::Utc>,
     ) -> impl Iterator<Item = Result<(Transaction, Uuid, u64)>> + 'a {
-        unsafe {
-            let max_time: DateTime = max_time.into();
-            let mut done = false;
-            self.next_attempt_index_accessor()
-                .cursor_unchecked()
-                .prefix_iter::<Uuid>(subscriber_id)
-                .keys()
-                .filter_map(move |key| {
-                    if done {
-                        return None;
-                    }
+        let max_time: DateTime = max_time.into();
+        let mut done = false;
+        self.next_attempt_index_accessor()
+            .cursor()
+            .prefix_iter::<[u8; 16]>(subscriber_id.into_bytes())
+            .keys()
+            .filter_map(move |key| {
+                if done {
+                    return None;
+                }
 
-                    let key = match key {
-                        Ok(key) => key,
-                        Err(e) => return Some(Err(e.into())),
-                    };
+                let key = match key {
+                    Ok(key) => key,
+                    Err(e) => return Some(Err(e.into())),
+                };
 
-                    if key.timestamp() >= max_time {
-                        done = true;
-                        return None;
-                    }
+                if key.timestamp() >= max_time {
+                    done = true;
+                    return None;
+                }
 
-                    let NextAttemptKey {
-                        subscriber_id,
-                        event_id,
-                        ..
-                    } = key;
-                    let key: DeliveryKey = packed!(event_id, subscriber_id);
-                    let transaction =
-                        self.db().begin_transaction_locked(&self.cf, AsBytes::as_bytes(&key));
+                let NextAttemptKey {
+                    subscriber_id,
+                    event_id,
+                    ..
+                } = key;
+                let key: DeliveryKey = packed!(event_id, subscriber_id);
+                let transaction =
+                    self.db().begin_transaction_locked(&self.cf, IntoBytes::as_bytes(&key));
 
-                    match transaction {
-                        Ok(transaction) => Some(Ok((transaction, subscriber_id, event_id.into()))),
-                        Err(_) => None,
-                    }
-                })
-        }
+                match transaction {
+                    Ok(transaction) => {
+                        Some(Ok((transaction, Uuid::from_bytes(subscriber_id), event_id.into())))
+                    },
+                    Err(_) => None,
+                }
+            })
     }
 
     pub(crate) fn delete(&self, txn: &mut Transaction, delivery: &Delivery) {

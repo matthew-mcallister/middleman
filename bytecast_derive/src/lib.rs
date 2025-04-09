@@ -26,7 +26,7 @@ fn get_repr(input: &ItemStruct) -> Option<Repr> {
 pub fn derive_has_layout(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as ItemStruct);
 
-    // We could certainly support generics with some added effort
+    // TODO: Support generics
     assert!(input.generics.params.is_empty(), "generics not currently supported");
     let name = &input.ident;
 
@@ -43,7 +43,7 @@ pub fn derive_has_layout(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 
     let impl_tokens = match repr {
         Repr::Transparent | Repr::C => quote! {
-            impl ::bytecast::layout::HasLayout for #name {
+            unsafe impl ::bytecast::layout::HasLayout for #name {
                 type DestructuredPointer = <#tail_type as ::bytecast::layout::HasLayout>::DestructuredPointer;
 
                 const LAYOUT: ::bytecast::layout::Layout = ::bytecast::layout::compute_layout(&[
@@ -52,10 +52,12 @@ pub fn derive_has_layout(input: proc_macro::TokenStream) -> proc_macro::TokenStr
             }
         },
         Repr::Packed => quote! {
-            impl ::bytecast::layout::HasLayout for #name {
+            unsafe impl ::bytecast::layout::HasLayout for #name {
                 type DestructuredPointer = <#tail_type as ::bytecast::layout::HasLayout>::DestructuredPointer;
 
-                const LAYOUT: ::bytecast::layout::Layout = ::bytecast::layout::compute_layout_packed(&[#(#field_types,)*]);
+                const LAYOUT: ::bytecast::layout::Layout = ::bytecast::layout::compute_layout_packed(&[
+                    #(<#field_types as ::bytecast::layout::HasLayout>::LAYOUT,)*
+                ]);
             }
         },
     };
@@ -77,33 +79,34 @@ pub fn derive_from_bytes(input: proc_macro::TokenStream) -> proc_macro::TokenStr
         );
 
         const _: () = assert!(
-            const {
+            {
                 let layout = &<#name as ::bytecast::layout::HasLayout>::LAYOUT;
-                layout.tail_stride == 0 || layout.tail_stride == layout.alignment.get()
+                layout.tail_stride == 0 || (
+                    layout.size % layout.alignment.get() == 0
+                    && layout.tail_stride % layout.alignment.get() == 0
+                )
             },
             // Unfortunately, tail padding may result in undefined behavior.
             concat!("type ", stringify!(#name), " has tail padding"),
         );
 
-        impl ::bytecast::TryFromBytes for #name {
-            fn try_ref_from_bytes(bytes: &[u8]) -> ::std::result::Result<&Self, ::bytecast::TryFromBytesError> {
-                let destructured = ::bytecast::layout::destructured_pointer_from_bytes::<#name>(bytes)?;
+        impl ::bytecast::FromBytes for #name {
+            fn ref_from_bytes(bytes: &[u8]) -> ::std::result::Result<&Self, ::bytecast::FromBytesError> {
+                let destructured = ::bytecast::layout::destructured_pointer_from_bytes::<Self>(bytes)?;
                 unsafe {
                     let ptr: *const Self = ::std::mem::transmute(destructured);
                     Ok(&*ptr)
                 }
             }
 
-            fn try_mut_from_bytes(bytes: &mut [u8]) -> ::std::result::Result<&mut Self, ::bytecast::TryFromBytesError> {
-                let destructured = ::bytecast::layout::destructured_pointer_from_bytes::<#name>(bytes)?;
+            fn mut_from_bytes(bytes: &mut [u8]) -> ::std::result::Result<&mut Self, ::bytecast::FromBytesError> {
+                let destructured = ::bytecast::layout::destructured_pointer_from_bytes::<Self>(bytes)?;
                 unsafe {
                     let ptr: *mut Self = ::std::mem::transmute(destructured);
                     Ok(&mut *ptr)
                 }
             }
         }
-
-        impl ::bytecast::FromBytes for #name {}
     };
 
     impl_tokens.into()
@@ -125,8 +128,8 @@ pub fn derive_into_bytes(input: proc_macro::TokenStream) -> proc_macro::TokenStr
         impl ::bytecast::IntoBytes for #name {
             fn as_bytes(&self) -> &[u8] {
                 unsafe {
-                    let destructured: <#name as ::bytecast::layout::HasLayout>::DestructuredPointer = std::mem::transmute(self);
-                    &*::bytecast::layout::bytes_from_destructured_pointer::<#name>(destructured)
+                    let destructured: <Self as ::bytecast::layout::HasLayout>::DestructuredPointer = std::mem::transmute(self);
+                    &*::bytecast::layout::bytes_from_destructured_pointer::<Self>(destructured)
                 }
             }
         }

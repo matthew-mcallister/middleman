@@ -23,10 +23,7 @@ impl db::column_family::ColumnFamilyDescriptor for ColumnFamilyName {
         match self {
             Self::EventTagStreamIndex => {
                 let mut options = rocksdb::Options::default();
-                options.set_comparator(
-                    "big_tuple",
-                    Box::new(|a, b| unsafe { big_tuple_comparator(a, b) }),
-                );
+                options.set_comparator("big_tuple", Box::new(big_tuple_comparator));
                 options
             },
             _ => Default::default(),

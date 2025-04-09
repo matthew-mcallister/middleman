@@ -7,15 +7,15 @@ macro_rules! big_tuple_struct {
         }
     ) => {
         $(#[$($meta)*])*
-        #[derive(ToOwned, OwnedFromBytesUnchecked)]
-        #[repr(transparent)]
+        #[derive(bytecast_derive::FromBytes, bytecast_derive::IntoBytes, bytecast_derive::HasLayout)]
+        #[repr(C)]
         $vis struct $Name($crate::big_tuple::BigTuple);
 
         impl $Name {
             fn new(
                 $($field: &$Field,)*
             ) -> Box<Self> {
-                let fields = &[$($crate::bytes::AsBytes::as_bytes($field),)*];
+                let fields = &[$(bytecast::IntoBytes::as_bytes($field),)*];
                 let mut info = $crate::big_tuple::BigTupleCreateInfo::default();
                 info.aligned = true;
                 info.fields = fields;
@@ -25,40 +25,16 @@ macro_rules! big_tuple_struct {
 
             $(
                 $field_vis fn $field(&self) -> &$Field {
-                    unsafe {
-                        <$Field as $crate::bytes::FromBytesUnchecked>::ref_from_bytes_unchecked(self.0.get($index))
-                    }
+                    self.0.get_as($index)
                 }
             )*
         }
 
         impl std::fmt::Debug for $Name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("Blah")
+                f.debug_struct(stringify!($Name))
                     $(.field(stringify!($field), &self.$field()))*
                     .finish()
-            }
-        }
-
-        unsafe impl $crate::bytes::AsBytes for $Name {
-            fn as_bytes(this: &Self) -> &[u8] {
-                $crate::bytes::AsBytes::as_bytes(&this.0)
-            }
-        }
-
-        impl $crate::bytes::AsRawBytes for $Name {
-            fn as_raw_bytes(&self) -> &[std::mem::MaybeUninit<u8>] {
-                self.0.as_raw_bytes()
-            }
-        }
-
-        impl $crate::bytes::FromBytesUnchecked for $Name {
-            unsafe fn ref_from_bytes_unchecked(bytes: &[u8]) -> &Self {
-                unsafe { std::mem::transmute($crate::big_tuple::BigTuple::ref_from_bytes_unchecked(bytes)) }
-            }
-
-            unsafe fn mut_from_bytes_unchecked(bytes: &mut [u8]) -> &mut Self {
-                unsafe { std::mem::transmute($crate::big_tuple::BigTuple::mut_from_bytes_unchecked(bytes)) }
             }
         }
 
@@ -73,6 +49,15 @@ macro_rules! big_tuple_struct {
         impl $crate::prefix::IsPrefixOf<$Name> for $crate::big_tuple::BigTuple {
             fn is_prefix_of(&self, key: &$Name) -> bool {
                 self.is_prefix_of(&key.0)
+            }
+        }
+
+
+        impl std::borrow::ToOwned for $Name {
+            type Owned = Box<Self>;
+
+            fn to_owned(&self) -> Box<Self> {
+                unsafe { std::mem::transmute(self.0.to_owned()) }
             }
         }
     };

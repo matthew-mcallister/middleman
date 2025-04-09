@@ -26,15 +26,14 @@ pub type Result<T> = std::result::Result<T, Box<Error>>;
 
 impl ErrorKind {
     fn status_code(&self) -> StatusCode {
-        unsafe {
-            std::mem::transmute::<u16, _>(match self {
-                Self::InvalidInput => 400,
-                Self::Busy => 409,
-                Self::Unexpected => 500,
-                // Not sure if 502 makes the most sense here
-                Self::NetworkError => 502,
-            })
-        }
+        StatusCode::try_from(match self {
+            Self::InvalidInput => 400,
+            Self::Busy => 409,
+            Self::Unexpected => 500,
+            // Not sure if 502 makes the most sense here
+            Self::NetworkError => 502,
+        })
+        .unwrap()
     }
 }
 

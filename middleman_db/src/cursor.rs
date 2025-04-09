@@ -1,7 +1,8 @@
 use std::borrow::Borrow;
 use std::marker::PhantomData;
 
-use crate::bytes::{AsRawBytes, OwnedFromBytesUnchecked};
+use bytecast::{FromBytes, IntoBytes};
+
 use crate::error::Result;
 use crate::prefix::IsPrefixOf;
 use crate::{Owned, Owned2, RawDb};
@@ -17,9 +18,9 @@ pub trait Cursor: Sized {
 
     fn next(&mut self);
 
-    unsafe fn key(&self) -> &Self::Key;
+    fn key(&self) -> &Self::Key;
 
-    unsafe fn value(&self) -> Owned<Self::Value>;
+    fn value(&self) -> Owned<Self::Value>;
 
     // FIXME: Sigh... type inference is broken because there's no way to infer
     // which implementation of ToOwned to use...
@@ -52,19 +53,16 @@ pub trait Cursor: Sized {
 
 pub struct BaseCursor<
     'db,
-    K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized,
-    V: OwnedFromBytesUnchecked + ToOwned + ?Sized,
+    K: FromBytes + IntoBytes + ToOwned + ?Sized,
+    V: FromBytes + ToOwned + ?Sized,
 > {
     raw: rocksdb::DBRawIteratorWithThreadMode<'db, RawDb>,
     _k: PhantomData<*const K>,
     _v: PhantomData<*const V>,
 }
 
-impl<
-        'db,
-        K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized,
-        V: OwnedFromBytesUnchecked + ToOwned + ?Sized,
-    > BaseCursor<'db, K, V>
+impl<'db, K: FromBytes + IntoBytes + ToOwned + ?Sized, V: FromBytes + ToOwned + ?Sized>
+    BaseCursor<'db, K, V>
 {
     pub(crate) fn new(raw: rocksdb::DBRawIteratorWithThreadMode<'db, RawDb>) -> Self {
         Self {
@@ -78,9 +76,8 @@ impl<
         self.raw.seek_to_first();
     }
 
-    fn raw_seek<Q: AsRawBytes + ?Sized>(&mut self, target: &Q) {
-        let raw_bytes = target.as_raw_bytes();
-        let bytes: &[u8] = unsafe { std::mem::transmute(raw_bytes) };
+    fn raw_seek<Q: IntoBytes + ?Sized>(&mut self, target: &Q) {
+        let bytes = target.as_bytes();
         self.raw.seek(bytes);
     }
 
@@ -88,11 +85,11 @@ impl<
         self.raw_seek(key)
     }
 
-    pub fn seek_prefix<P: IsPrefixOf<K> + AsRawBytes + ToOwned + ?Sized>(&mut self, prefix: &P) {
+    pub fn seek_prefix<P: IsPrefixOf<K> + IntoBytes + ToOwned + ?Sized>(&mut self, prefix: &P) {
         self.raw_seek(prefix);
     }
 
-    pub fn prefix_iter<P: IsPrefixOf<K> + AsRawBytes + ToOwned + ?Sized>(
+    pub fn prefix_iter<P: IsPrefixOf<K> + IntoBytes + ToOwned + ?Sized>(
         mut self,
         prefix: Owned<P>,
     ) -> Prefix<Self, P> {
@@ -101,11 +98,8 @@ impl<
     }
 }
 
-impl<
-        'db,
-        K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized,
-        V: OwnedFromBytesUnchecked + ToOwned + ?Sized,
-    > Cursor for BaseCursor<'db, K, V>
+impl<'db, K: FromBytes + IntoBytes + ToOwned + ?Sized, V: FromBytes + ToOwned + ?Sized> Cursor
+    for BaseCursor<'db, K, V>
 {
     type Key = K;
     type Value = V;
@@ -125,17 +119,17 @@ impl<
         self.raw.next();
     }
 
-    unsafe fn key(&self) -> &K {
+    fn key(&self) -> &K {
         // FIXME: There should be a static assertion that K has alignment 1
         // because we are casting unaligned memory. Need yet another trait for
         // this because K is unsized.
         let bytes = self.raw.key().unwrap();
-        K::ref_from_bytes_unchecked(bytes)
+        K::ref_from_bytes(bytes).unwrap()
     }
 
-    unsafe fn value(&self) -> Owned<V> {
+    fn value(&self) -> Owned<V> {
         let bytes = self.raw.value().unwrap();
-        V::owned_from_bytes_unchecked(bytes)
+        V::ref_from_bytes(bytes).unwrap().to_owned()
     }
 }
 
@@ -166,7 +160,7 @@ impl<C: Cursor, P: IsPrefixOf<C::Key> + ToOwned + ?Sized> Cursor for Prefix<C, P
         }
         match self.cursor.check_status()? {
             Some(()) => {
-                if !self.prefix.borrow().is_prefix_of(unsafe { self.key() }) {
+                if !self.prefix.borrow().is_prefix_of(self.key()) {
                     self.done = true;
                     Ok(None)
                 } else {
@@ -181,11 +175,11 @@ impl<C: Cursor, P: IsPrefixOf<C::Key> + ToOwned + ?Sized> Cursor for Prefix<C, P
         self.cursor.next();
     }
 
-    unsafe fn key(&self) -> &Self::Key {
+    fn key(&self) -> &Self::Key {
         self.cursor.key()
     }
 
-    unsafe fn value(&self) -> Owned<Self::Value> {
+    fn value(&self) -> Owned<Self::Value> {
         self.cursor.value()
     }
 }
@@ -199,7 +193,7 @@ impl<C: Cursor> Iterator for Iter<C> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let res = match self.cursor.check_status() {
-            Ok(Some(())) => unsafe {
+            Ok(Some(())) => {
                 let key = self.cursor.key();
                 let value = self.cursor.value();
                 Some(Ok((key.to_owned(), value)))
@@ -221,7 +215,7 @@ impl<C: Cursor> Iterator for Keys<C> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let res = match self.cursor.check_status() {
-            Ok(Some(())) => unsafe {
+            Ok(Some(())) => {
                 let key = self.cursor.key();
                 Some(Ok(key.to_owned()))
             },
@@ -242,7 +236,7 @@ impl<C: Cursor> Iterator for Values<C> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let res = match self.cursor.check_status() {
-            Ok(Some(())) => unsafe {
+            Ok(Some(())) => {
                 let value = self.cursor.value();
                 Some(Ok(value))
             },
@@ -254,11 +248,8 @@ impl<C: Cursor> Iterator for Values<C> {
     }
 }
 
-impl<
-        'db,
-        K: OwnedFromBytesUnchecked + AsRawBytes + ToOwned + ?Sized,
-        V: OwnedFromBytesUnchecked + ToOwned + ?Sized,
-    > IntoIterator for BaseCursor<'db, K, V>
+impl<'db, K: FromBytes + IntoBytes + ToOwned + ?Sized, V: FromBytes + ToOwned + ?Sized> IntoIterator
+    for BaseCursor<'db, K, V>
 {
     type IntoIter = Iter<Self>;
     type Item = <Iter<Self> as Iterator>::Item;

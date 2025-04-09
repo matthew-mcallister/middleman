@@ -1,30 +1,6 @@
+use layout::HasLayout;
+
 pub mod layout;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TryFromBytesError {
-    InvalidSize,
-    InvalidAlignment,
-    InvalidRepresentation,
-}
-
-impl TryFromBytesError {
-    fn assert_valid_representation(self) -> FromBytesError {
-        match self {
-            Self::InvalidSize => FromBytesError::InvalidSize,
-            Self::InvalidAlignment => FromBytesError::InvalidAlignment,
-            Self::InvalidRepresentation => unreachable!(),
-        }
-    }
-}
-
-impl From<FromBytesError> for TryFromBytesError {
-    fn from(value: FromBytesError) -> Self {
-        match value {
-            FromBytesError::InvalidAlignment => TryFromBytesError::InvalidAlignment,
-            FromBytesError::InvalidSize => TryFromBytesError::InvalidSize,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FromBytesError {
@@ -32,23 +8,15 @@ pub enum FromBytesError {
     InvalidAlignment,
 }
 
-pub trait TryFromBytes {
-    // XXX: This API has the same underlying problem as `try_box_from_bytes`,
-    // and the padding bytes of `&Self` could overlap with adjacent initialized
-    // bytes, which could cause UB in LLVM. We work around this in the derive
-    // crate by asserting that the tail has no padding.
-    fn try_ref_from_bytes(bytes: &[u8]) -> Result<&Self, TryFromBytesError>;
-    fn try_mut_from_bytes(bytes: &mut [u8]) -> Result<&mut Self, TryFromBytesError>;
-}
+// XXX: This API unfortunately can't be made sound as-is on slice DSTs that may
+// have padding after the tail due to alignment. Some compromises or
+// workarounds are necessary, such as enriching byte slices with alignment
+// information. For now, the derive macro simply fails on any type with this
+// issue, leaving the user to sort out the alignment.
+pub trait FromBytes {
+    fn ref_from_bytes(bytes: &[u8]) -> Result<&Self, FromBytesError>;
 
-pub trait FromBytes: TryFromBytes {
-    fn ref_from_bytes(bytes: &[u8]) -> Result<&Self, FromBytesError> {
-        Self::try_ref_from_bytes(bytes).map_err(|e| e.assert_valid_representation())
-    }
-
-    fn mut_from_bytes(bytes: &mut [u8]) -> Result<&mut Self, FromBytesError> {
-        Self::try_mut_from_bytes(bytes).map_err(|e| e.assert_valid_representation())
-    }
+    fn mut_from_bytes(bytes: &mut [u8]) -> Result<&mut Self, FromBytesError>;
 }
 
 /// Allows reading the individual bytes of a type. The type itself must have no
@@ -81,24 +49,6 @@ where
     }
 }
 
-// XXX: Unfortunately, for slice DSTs, this API is not technically sound in
-// that `bytes` was not allocated with the same alignment as `T`, meaning the
-// `T` value might overflow the allocation after its size is padded to a
-// multiple of its alignment. In practice, memory allocators must guarantee
-// allocations are a multiple of the coarsest possible alignment for a system
-// (generally 8/16 bytes) in order to be compatible with C, preventing such
-// overflow.
-pub fn try_box_from_bytes<T: TryFromBytes + ?Sized>(
-    mut bytes: Box<[u8]>,
-) -> std::result::Result<Box<T>, (TryFromBytesError, Box<[u8]>)> {
-    let ptr = match T::try_mut_from_bytes(&mut bytes[..]) {
-        Ok(r) => r as *mut T,
-        Err(e) => return Err((e, bytes)),
-    };
-    std::mem::forget(bytes);
-    unsafe { Ok(Box::from_raw(ptr)) }
-}
-
 pub fn box_from_bytes<T: FromBytes + ?Sized>(
     mut bytes: Box<[u8]>,
 ) -> std::result::Result<Box<T>, (FromBytesError, Box<[u8]>)> {
@@ -110,51 +60,153 @@ pub fn box_from_bytes<T: FromBytes + ?Sized>(
     unsafe { Ok(Box::from_raw(ptr as *mut T)) }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::layout::{HasLayout, compute_layout};
+macro_rules! from_bytes_impl {
+    () => {
+        fn ref_from_bytes(bytes: &[u8]) -> Result<&Self, FromBytesError> {
+            let address = bytes.as_ptr() as usize;
+            let layout = &<Self as HasLayout>::LAYOUT;
+            if address % layout.alignment != 0 {
+                return Err(FromBytesError::InvalidAlignment);
+            }
+            layout::validate_size(layout, bytes.len())?;
+            Ok(unsafe { &*(address as *const Self) })
+        }
 
-    #[test]
-    fn test_layout_with_padding() {
-        let layout = compute_layout(&[u32::LAYOUT, u16::LAYOUT, u32::LAYOUT]);
-        assert_eq!(layout.size, 12);
-        assert_eq!(layout.alignment.get(), 4);
-        assert_eq!(layout.has_trap_values, false);
-        assert_eq!(layout.has_padding, true);
-        assert_eq!(layout.tail_stride, 0);
+        fn mut_from_bytes(bytes: &mut [u8]) -> Result<&mut Self, FromBytesError> {
+            let address = bytes.as_ptr() as usize;
+            let layout = &<Self as HasLayout>::LAYOUT;
+            if address % layout.alignment != 0 {
+                return Err(FromBytesError::InvalidAlignment);
+            }
+            layout::validate_size(layout, bytes.len())?;
+            Ok(unsafe { &mut *(address as *mut Self) })
+        }
+    };
+}
+
+macro_rules! from_bytes_primitive {
+    ($Type:ty) => {
+        impl FromBytes for $Type {
+            from_bytes_impl!();
+        }
+    };
+}
+
+macro_rules! into_bytes_impl {
+    () => {
+        fn as_bytes(&self) -> &[u8] {
+            unsafe {
+                std::slice::from_raw_parts(
+                    self as *const Self as *const u8,
+                    std::mem::size_of::<Self>(),
+                )
+            }
+        }
+    };
+}
+
+macro_rules! into_bytes_primitive {
+    ($Type:ty) => {
+        impl IntoBytes for $Type {
+            into_bytes_impl!();
+        }
+    };
+}
+
+from_bytes_primitive!(u8);
+from_bytes_primitive!(u16);
+from_bytes_primitive!(u32);
+from_bytes_primitive!(u64);
+from_bytes_primitive!(u128);
+from_bytes_primitive!(usize);
+from_bytes_primitive!(i8);
+from_bytes_primitive!(i16);
+from_bytes_primitive!(i32);
+from_bytes_primitive!(i64);
+from_bytes_primitive!(i128);
+from_bytes_primitive!(isize);
+into_bytes_primitive!(u8);
+into_bytes_primitive!(u16);
+into_bytes_primitive!(u32);
+into_bytes_primitive!(u64);
+into_bytes_primitive!(u128);
+into_bytes_primitive!(usize);
+into_bytes_primitive!(i8);
+into_bytes_primitive!(i16);
+into_bytes_primitive!(i32);
+into_bytes_primitive!(i64);
+into_bytes_primitive!(i128);
+into_bytes_primitive!(isize);
+into_bytes_primitive!(bool);
+
+impl<const N: usize, T: FromBytes> FromBytes for [T; N]
+where
+    Self: HasLayout,
+{
+    from_bytes_impl!();
+}
+
+impl<const N: usize, T: IntoBytes> IntoBytes for [T; N]
+where
+    Self: HasLayout,
+{
+    into_bytes_impl!();
+}
+
+impl FromBytes for () {
+    from_bytes_impl!();
+}
+
+impl IntoBytes for ()
+where
+    Self: HasLayout,
+{
+    into_bytes_impl!();
+}
+
+macro_rules! impl_tuple {
+    ($($Tn:ident),*) => {
+        impl<$($Tn: HasLayout + FromBytes,)*> FromBytes for ($($Tn,)*) {
+            from_bytes_impl!();
+        }
+
+        impl<$($Tn: HasLayout + IntoBytes,)*> IntoBytes for ($($Tn,)*) {
+            into_bytes_impl!();
+        }
+    }
+}
+
+impl_tuple!(T1, T2);
+impl_tuple!(T1, T2, T3);
+impl_tuple!(T1, T2, T3, T4);
+impl_tuple!(T1, T2, T3, T4, T5);
+impl_tuple!(T1, T2, T3, T4, T5, T6);
+
+impl<T: HasLayout + FromBytes> FromBytes for [T] {
+    fn ref_from_bytes(bytes: &[u8]) -> Result<&Self, FromBytesError> {
+        let address = bytes.as_ptr() as usize;
+        let layout = &<Self as HasLayout>::LAYOUT;
+        if address % layout.alignment != 0 {
+            return Err(FromBytesError::InvalidAlignment);
+        }
+        let len = layout::validate_size(layout, bytes.len())?;
+        Ok(unsafe { std::slice::from_raw_parts(address as *const T, len) })
     }
 
-    #[test]
-    fn test_layout_with_trap() {
-        let layout = compute_layout(&[bool::LAYOUT]);
-        assert_eq!(layout.size, 1);
-        assert_eq!(layout.alignment.get(), 1);
-        assert_eq!(layout.has_trap_values, true);
-        assert_eq!(layout.has_padding, false);
-        assert_eq!(layout.tail_stride, 0);
+    fn mut_from_bytes(bytes: &mut [u8]) -> Result<&mut Self, FromBytesError> {
+        let address = bytes.as_ptr() as usize;
+        let layout = &<Self as HasLayout>::LAYOUT;
+        if address % layout.alignment != 0 {
+            return Err(FromBytesError::InvalidAlignment);
+        }
+        let len = layout::validate_size(layout, bytes.len())?;
+        Ok(unsafe { std::slice::from_raw_parts_mut(address as *mut T, len) })
     }
+}
 
-    #[test]
-    fn test_slice_dst_layout() {
-        let layout = compute_layout(&[u32::LAYOUT, u16::LAYOUT, <[u8]>::LAYOUT]);
-        assert_eq!(layout.size, 6);
-        assert_eq!(layout.alignment.get(), 4);
-        assert_eq!(layout.has_trap_values, false);
-        assert_eq!(layout.has_padding, false);
-        assert_eq!(layout.tail_stride, 1);
-
-        let layout = compute_layout(&[u32::LAYOUT, u16::LAYOUT, <[u64]>::LAYOUT]);
-        assert_eq!(layout.size, 8);
-        assert_eq!(layout.alignment.get(), 8);
-        assert_eq!(layout.has_trap_values, false);
-        assert_eq!(layout.has_padding, true);
-        assert_eq!(layout.tail_stride, 8);
-    }
-
-    #[test]
-    fn test_transparent_layout() {
-        let layout1 = compute_layout(&[u32::LAYOUT, u16::LAYOUT, u32::LAYOUT]);
-        let layout2 = compute_layout(&[layout1]);
-        assert_eq!(layout1, layout2);
+impl<T: HasLayout + IntoBytes> IntoBytes for [T] {
+    fn as_bytes(&self) -> &[u8] {
+        let len = self.len() * std::mem::size_of::<T>();
+        unsafe { std::slice::from_raw_parts(self.as_ptr() as *const u8, len) }
     }
 }

@@ -2,13 +2,13 @@ use std::borrow::Cow;
 use std::fmt::Display;
 use std::sync::Arc;
 
+use bytecast::IntoBytes;
+use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
 use db::big_tuple::{big_tuple, BigTuple};
-use db::bytes::AsBytes;
 use db::key::{packed, BigEndianU64, Packed2, Packed3};
 use db::model::big_tuple_struct;
 use db::{Accessor, ColumnFamily, Cursor, Db, Transaction};
 use middleman_db::{self as db, ColumnFamilyDescriptor, Sequence};
-use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use uuid::Uuid;
 
 use crate::api::to_json::{ConsumerApiSerializer, JsonFormatter, ProducerApiSerializer};
@@ -16,24 +16,21 @@ use crate::db::ColumnFamilyName;
 use crate::error::Result;
 
 // TODO: ID should probably be stored on the event
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, Eq, FromBytes, HasLayout, IntoBytes, PartialEq)]
+#[repr(C)]
 struct EventHeader {
-    idempotency_key: Uuid,
-    tag: Uuid,
+    idempotency_key: [u8; 16],
+    tag: [u8; 16],
     id: u64,
     _reserved: [u64; 2],
 }
-
-unsafe impl AsBytes for EventHeader {}
 
 big_tuple_struct! {
     /// Immutable event data structure.
     pub struct Event {
         header[0]: EventHeader,
-        pub stream[1]: str,
-        // XXX: Make this BSON?
-        pub payload[2]: str,
+        pub stream_bytes[1]: [u8],
+        pub payload_bytes[2]: [u8],
     }
 }
 
@@ -43,11 +40,19 @@ impl Event {
     }
 
     pub fn idempotency_key(&self) -> Uuid {
-        self.header().idempotency_key
+        Uuid::from_bytes(self.header().idempotency_key)
     }
 
     pub fn tag(&self) -> Uuid {
-        self.header().tag
+        Uuid::from_bytes(self.header().tag)
+    }
+
+    pub fn stream(&self) -> &str {
+        std::str::from_utf8(self.stream_bytes()).unwrap()
+    }
+
+    pub fn payload(&self) -> &str {
+        std::str::from_utf8(self.payload_bytes()).unwrap()
     }
 }
 
@@ -68,6 +73,9 @@ impl Display for JsonFormatter<ProducerApiSerializer<Event>> {
             idempotency_key = self.0 .0.idempotency_key(),
             tag = self.0 .0.tag(),
             stream = self.0 .0.stream(),
+            // TODO maybe: the string cast here has a small but nontrivial
+            // overhead, esp. if the payload is large (100kb+). Could avoid by
+            // treating as bytes instead of str.
             payload = self.0 .0.payload(),
         )
     }
@@ -127,13 +135,13 @@ impl<'a> EventBuilder<'a> {
     pub(crate) fn build(&mut self, id: u64) -> Box<Event> {
         Event::new(
             &EventHeader {
-                tag: self.tag.unwrap(),
-                idempotency_key: self.idempotency_key.unwrap(),
+                tag: self.tag.unwrap().into_bytes(),
+                idempotency_key: self.idempotency_key.unwrap().into_bytes(),
                 id,
                 _reserved: [0; 2],
             },
-            &*self.stream.take().unwrap(),
-            &*self.payload.take().unwrap(),
+            &*self.stream.take().unwrap().as_bytes(),
+            &*self.payload.take().unwrap().as_bytes(),
         )
     }
 }
@@ -148,8 +156,8 @@ pub(crate) struct EventTable {
 
 big_tuple_struct! {
     pub struct EventStreamIndexKey {
-        tag[0]: Uuid,
-        stream[1]: str,
+        tag[0]: [u8; 16],
+        stream[1]: [u8],
         id[2]: BigEndianU64,
     }
 }
@@ -170,11 +178,13 @@ impl EventTable {
         })
     }
 
-    fn accessor<'a>(&'a self) -> Accessor<'a, Packed2<Uuid, BigEndianU64>, Event> {
+    fn accessor<'a>(&'a self) -> Accessor<'a, Packed2<[u8; 16], BigEndianU64>, Event> {
         Accessor::new(&self.cf)
     }
 
-    fn tag_idempotency_index_accessor<'a>(&'a self) -> Accessor<'a, Packed2<Uuid, Uuid>, u64> {
+    fn tag_idempotency_index_accessor<'a>(
+        &'a self,
+    ) -> Accessor<'a, Packed2<[u8; 16], [u8; 16]>, u64> {
         Accessor::new(&self.tag_idempotency_index_cf)
     }
 
@@ -191,8 +201,9 @@ impl EventTable {
         let (tag, idempotency_key) = (builder.tag.unwrap(), builder.idempotency_key.unwrap());
 
         // Acquire lock
-        let key: Packed3<[u8; 6], Uuid, Uuid> = (*b"event:", tag, idempotency_key).into();
-        txn.lock_key(&self.cf, AsBytes::as_bytes(&key))?;
+        let key: Packed3<[u8; 6], [u8; 16], [u8; 16]> =
+            (*b"event:", tag.into_bytes(), idempotency_key.into_bytes()).into();
+        txn.lock_key(&self.cf, IntoBytes::as_bytes(&key))?;
 
         // Try to fetch existing record by idempotency key
         let existing_id = self.get_id_by_idempotency_key(txn, tag, idempotency_key)?;
@@ -203,14 +214,14 @@ impl EventTable {
         // Create primary record
         let id = self.id_sequence.next()?;
         let event = builder.build(id);
-        self.accessor().put_txn(txn, &packed!(tag, id.into()), &event);
+        self.accessor().put_txn(txn, &packed!(tag.into_bytes(), id.into()), &event);
 
         // Index by tag + idempotency key
-        let key = packed!(tag, idempotency_key);
+        let key = packed!(tag.into_bytes(), idempotency_key.into_bytes());
         self.tag_idempotency_index_accessor().put_txn(txn, &key, &id);
 
         // Index by tag + stream
-        let key = EventStreamIndexKey::new(&tag, event.stream(), &id.into());
+        let key = EventStreamIndexKey::new(tag.as_bytes(), event.stream_bytes(), &id.into());
         self.tag_stream_index_accessor().put_txn(txn, &key, &());
 
         Ok(event)
@@ -218,8 +229,8 @@ impl EventTable {
 
     pub fn get(&self, tag: Uuid, id: u64) -> Result<Option<Box<Event>>> {
         // XXX: Is pinning the slice here a performance win? In which cases?
-        let key = packed!(tag, id.into());
-        unsafe { Ok(self.accessor().get_unchecked(&key)?) }
+        let key = packed!(tag.into_bytes(), id.into());
+        Ok(self.accessor().get(&key)?)
     }
 
     pub fn get_id_by_idempotency_key(
@@ -228,13 +239,11 @@ impl EventTable {
         tag: Uuid,
         idempotency_key: Uuid,
     ) -> Result<Option<u64>> {
-        let key: Packed2<Uuid, Uuid> = (tag, idempotency_key).into();
-        unsafe {
-            self.tag_idempotency_index_accessor()
-                .get_txn_unchecked(txn, &key)
-                .map(|x| x.map(|x| *x))
-                .map_err(Into::into)
-        }
+        let key = packed!(tag.into_bytes(), idempotency_key.into_bytes());
+        self.tag_idempotency_index_accessor()
+            .get_txn(txn, &key)
+            .map(|x| x.map(|x| *x))
+            .map_err(Into::into)
     }
 
     pub fn get_by_idempotency_key(
@@ -254,8 +263,8 @@ impl EventTable {
         tag: Uuid,
         starting_id: u64,
     ) -> impl Iterator<Item = Result<Box<Event>>> + 'a {
-        let mut cursor = unsafe { self.accessor().cursor_unchecked() };
-        cursor.seek(&packed!(tag, starting_id.into()));
+        let mut cursor = self.accessor().cursor();
+        cursor.seek(&packed!(tag.into_bytes(), starting_id.into()));
         cursor.prefix::<[u8; 16]>(*tag.as_bytes()).values().map(|x| x.map_err(Into::into))
     }
 
@@ -265,9 +274,10 @@ impl EventTable {
         stream: &str,
         starting_id: u64,
     ) -> impl Iterator<Item = Result<Box<Event>>> + 'a {
-        let prefix = big_tuple!(&tag, stream);
-        let mut cursor = unsafe { self.tag_stream_index_accessor().cursor_unchecked() };
-        let seek_to = EventStreamIndexKey::new(&tag, stream, &starting_id.into());
+        let prefix = big_tuple!(tag.as_bytes(), stream.as_bytes());
+        let mut cursor = self.tag_stream_index_accessor().cursor();
+        let seek_to =
+            EventStreamIndexKey::new(tag.as_bytes(), stream.as_bytes(), &starting_id.into());
         cursor.seek(&seek_to);
         cursor.prefix::<BigTuple>(prefix).keys().map(move |key| {
             let id = *key?.id();
@@ -414,9 +424,6 @@ mod tests {
         events.create(&mut txn1, event.clone()).unwrap();
 
         let mut txn2 = Transaction::new(Arc::clone(&app.db));
-        assert_eq!(
-            events.create(&mut txn2, event).unwrap_err().kind(),
-            ErrorKind::Busy
-        );
+        assert_eq!(events.create(&mut txn2, event).unwrap_err().kind(), ErrorKind::Busy);
     }
 }

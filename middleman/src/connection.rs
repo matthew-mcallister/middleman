@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
-use std::mem::ManuallyDrop;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,28 +36,28 @@ pub trait ConnectionFactory: Debug + Send + Sync + 'static {
 pub struct ConnectionHandle<'pl, K: Key, C: Connection> {
     pool: &'pl Http11ConnectionPool<K, C>,
     key: K,
-    connection: ManuallyDrop<Box<C>>,
+    connection: Option<Box<C>>,
 }
 
 impl<'pool, K: Key, C: Connection> std::ops::Deref for ConnectionHandle<'pool, K, C> {
     type Target = C;
 
     fn deref(&self) -> &Self::Target {
-        &*self.connection
+        self.connection.as_ref().unwrap()
     }
 }
 
 impl<'pool, K: Key, C: Connection> std::ops::DerefMut for ConnectionHandle<'pool, K, C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.connection
+        self.connection.as_mut().unwrap()
     }
 }
 
 impl<'pool, K: Key, C: Connection> Drop for ConnectionHandle<'pool, K, C> {
     fn drop(&mut self) {
         // Return to idle pool
-        let connection = unsafe { ManuallyDrop::take(&mut self.connection) };
-        self.pool.push_idle(&self.key, connection);
+        let connection = self.connection.take();
+        self.pool.push_idle(&self.key, connection.unwrap());
     }
 }
 
@@ -118,19 +117,16 @@ pub struct Http11ConnectionPool<K: Key, C: Connection> {
     total_connections: AtomicU64,
 }
 
-unsafe impl<K: Key, C: Connection> Send for Http11ConnectionPool<K, C> {}
-unsafe impl<K: Key, C: Connection> Sync for Http11ConnectionPool<K, C> {}
+struct Guard<F: FnMut()>(F);
 
-struct Guard<F: FnOnce()>(ManuallyDrop<F>);
-
-impl<F: FnOnce()> Drop for Guard<F> {
+impl<F: FnMut()> Drop for Guard<F> {
     fn drop(&mut self) {
-        unsafe { (ManuallyDrop::take(&mut self.0))() }
+        (self.0)()
     }
 }
 
-fn guard<F: FnOnce()>(f: F) -> Guard<F> {
-    Guard(ManuallyDrop::new(f))
+fn guard<F: FnMut()>(f: F) -> Guard<F> {
+    Guard(f)
 }
 
 impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
@@ -240,7 +236,7 @@ impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
         Ok(ConnectionHandle {
             pool: self,
             key: key.clone(),
-            connection: ManuallyDrop::new(connection),
+            connection: Some(connection),
         })
     }
 

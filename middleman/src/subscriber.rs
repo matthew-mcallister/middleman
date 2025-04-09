@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use db::bytes::AsBytes;
+use bytecast::{FromBytes, IntoBytes};
+use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
 use db::key::{packed, Packed2};
 use db::model::big_tuple_struct;
 use db::{Accessor, ColumnFamily, Cursor, Db, Transaction};
 use middleman_db::{self as db, ColumnFamilyDescriptor};
-use middleman_macros::{OwnedFromBytesUnchecked, ToOwned};
 use regex::Regex;
 use serde::ser::SerializeStruct;
 use serde::Serialize;
@@ -16,22 +16,21 @@ use crate::api::to_json::{ConsumerApiSerializer, ProducerApiSerializer};
 use crate::db::ColumnFamilyName;
 use crate::error::Result;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, FromBytes, HasLayout, IntoBytes)]
+#[repr(C)]
 struct SubscriberHeader {
-    tag: Uuid,
-    id: Uuid,
+    tag: [u8; 16],
+    id: [u8; 16],
     _reserved: [u64; 2],
 }
-
-unsafe impl AsBytes for SubscriberHeader {}
 
 big_tuple_struct! {
     /// Subscriber that receives events or notifications.
     pub struct Subscriber {
         header[0]: SubscriberHeader,
-        pub destination_url[1]: str,
-        pub stream_regex[2]: str,
-        pub hmac_key[3]: str,
+        pub destination_url_bytes[1]: [u8],
+        pub stream_regex_bytes[2]: [u8],
+        pub hmac_key_bytes[3]: [u8],
     }
 }
 
@@ -68,16 +67,28 @@ pub(crate) struct SubscriberTable {
     tag_index_cf: ColumnFamily,
 }
 
-pub(crate) type SubscriberKey = Uuid;
-pub(crate) type TagIndexKey = Packed2<Uuid, Uuid>;
+pub(crate) type SubscriberKey = [u8; 16];
+pub(crate) type TagIndexKey = Packed2<[u8; 16], [u8; 16]>;
 
 impl Subscriber {
     pub fn tag(&self) -> Uuid {
-        self.header().tag
+        Uuid::from_bytes(self.header().tag)
     }
 
     pub fn id(&self) -> Uuid {
-        self.header().id
+        Uuid::from_bytes(self.header().id)
+    }
+
+    pub fn destination_url(&self) -> &str {
+        std::str::from_utf8(self.destination_url_bytes()).unwrap()
+    }
+
+    pub fn stream_regex(&self) -> &str {
+        std::str::from_utf8(self.stream_regex_bytes()).unwrap()
+    }
+
+    pub fn hmac_key(&self) -> &str {
+        std::str::from_utf8(self.hmac_key_bytes()).unwrap()
     }
 }
 
@@ -107,18 +118,18 @@ impl SubscriberTable {
         mut builder: SubscriberBuilder,
     ) -> Result<Box<Subscriber>> {
         let subscriber = builder.build()?;
-        self.accessor().put_txn(txn, &subscriber.id(), &subscriber);
-        let key = packed!(subscriber.tag(), subscriber.id());
+        self.accessor().put_txn(txn, subscriber.id().as_bytes(), &subscriber);
+        let key = packed!(subscriber.tag().into_bytes(), subscriber.id().into_bytes());
         self.tag_index_accessor().put_txn(txn, &key, &());
         Ok(subscriber)
     }
 
     pub fn get(&self, id: Uuid) -> Result<Option<Box<Subscriber>>> {
-        unsafe { Ok(self.accessor().get_unchecked(&id)?) }
+        Ok(self.accessor().get(id.as_bytes())?)
     }
 
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = Result<Box<Subscriber>>> + 'a {
-        let mut cursor = unsafe { self.accessor().cursor_unchecked() };
+        let mut cursor = self.accessor().cursor();
         cursor.seek_to_first();
         cursor.values().map(|r| r.map_err(Into::into))
     }
@@ -128,16 +139,12 @@ impl SubscriberTable {
         &'a self,
         tag: Uuid,
     ) -> impl Iterator<Item = Result<Box<Subscriber>>> + 'a {
-        unsafe {
-            self.tag_index_accessor()
-                .cursor_unchecked()
-                .prefix_iter::<[u8; 16]>(*tag.as_bytes())
-                .keys()
-                .map(|key| {
-                    let Packed2(_, id) = key?;
-                    Ok(self.get(id).transpose().unwrap()?)
-                })
-        }
+        self.tag_index_accessor().cursor().prefix_iter::<[u8; 16]>(*tag.as_bytes()).keys().map(
+            |key| {
+                let Packed2(_, id) = key?;
+                Ok(self.get(Uuid::from_bytes(id)).transpose().unwrap()?)
+            },
+        )
     }
 
     /// Iterates over all subscribers of the given stream. This may be slow if
@@ -213,15 +220,15 @@ impl SubscriberBuilder {
         let stream_regex = self.stream_regex.take().ok_or("missing subscriber regex")?;
         let hmac_key = self.hmac_key.take().ok_or("missing subscriber HMAC key")?;
         let header = SubscriberHeader {
-            tag: self.tag.ok_or("missing tag")?,
-            id: self.id.ok_or("missing ID")?,
+            tag: self.tag.ok_or("missing tag")?.into_bytes(),
+            id: self.id.ok_or("missing ID")?.into_bytes(),
             _reserved: [0; 2],
         };
         Ok(Subscriber::new(
             &header,
-            destination_url.as_str(),
-            stream_regex.as_str(),
-            hmac_key.as_str(),
+            destination_url.as_str().as_bytes(),
+            stream_regex.as_str().as_bytes(),
+            hmac_key.as_str().as_bytes(),
         ))
     }
 }
@@ -265,9 +272,6 @@ mod tests {
         assert_eq!(subscriber.stream_regex(), regex);
         assert_eq!(subscriber.destination_url(), url);
 
-        assert_eq!(
-            subscribers.get(subscriber.id()).unwrap().unwrap(),
-            subscriber,
-        );
+        assert_eq!(subscribers.get(subscriber.id()).unwrap().unwrap(), subscriber,);
     }
 }

@@ -1,6 +1,6 @@
+#![feature(trace_macros)]
 pub mod accessor;
 pub mod big_tuple;
-pub mod bytes;
 pub mod column_family;
 pub mod comparator;
 pub mod cursor;

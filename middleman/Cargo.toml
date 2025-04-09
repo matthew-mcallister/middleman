@@ -14,7 +14,6 @@ compact_str = "0.8.1"
 dashmap = "6.1.0"
 dotenvy = "0.15.7"
 env_logger = "0.11.6"
-middleman_macros = { version = "0.1.0", path = "../middleman_macros" }
 middleman_db = { version = "0.1.0", path = "../middleman_db" }
 owning_ref = "0.4.1"
 parking_lot = "0.12.3"
@@ -46,6 +45,8 @@ sqlx = { version = "0.8.3", features = ["runtime-tokio", "tls-native-tls", "sqli
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 tower-http = { version = "0.6.2", features = ["trace"] }
+bytecast = { version = "0.1.0", path = "../bytecast" }
+bytecast_derive = { version = "0.1.0", path = "../bytecast_derive" }
 
 [dev-dependencies]
 statrs = "0.18.0"
@@ -62,6 +63,3 @@ features = ["full", "test-util", "tracing"]
 [dev-dependencies.axum]
 version = "0.8.1"
 features = ["macros"]
-
-[profile.release]
-panic = 'abort'
