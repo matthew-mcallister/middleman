@@ -2,6 +2,10 @@
 resolver = "2"
 members = [
     "middleman",
-    "middleman_macros",
-    "middleman_db"
+    "middleman_db",
+    "bytecast",
+    "bytecast_derive",
 ]
+
+[profile.release]
+panic = 'abort'

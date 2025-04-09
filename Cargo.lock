@@ -283,6 +283,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
 
 [[package]]
+name = "bytecast"
+version = "0.1.0"
+
+[[package]]
+name = "bytecast_derive"
+version = "0.1.0"
+dependencies = [
+ "bytecast",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1389,7 +1403,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "middleman_db",
- "middleman_macros",
  "owning_ref",
  "parking_lot",
  "paste",
@@ -1413,6 +1426,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1424,20 +1438,10 @@ dependencies = [
  "byteview",
  "dashmap",
  "log",
- "middleman_macros",
  "owning_ref",
  "rocksdb",
  "tempfile",
  "uuid",
-]
-
-[[package]]
-name = "middleman_macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
