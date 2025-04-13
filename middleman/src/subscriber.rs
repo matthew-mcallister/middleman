@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use bytecast::{FromBytes, IntoBytes};
-use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+use bytecast::{FromBytes, HasLayout, IntoBytes};
 use db::key::{packed, Packed2};
 use db::model::big_tuple_struct;
 use db::{Accessor, ColumnFamily, Cursor, Db, Transaction};

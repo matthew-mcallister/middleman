@@ -1,7 +1,6 @@
 #![feature(trace_macros)]
 
-use bytecast::{FromBytes, FromBytesError, IntoBytes, IntoBytesMut, box_from_bytes};
-use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+use bytecast::{FromBytes, FromBytesError, HasLayout, IntoBytes, IntoBytesMut, box_from_bytes};
 
 #[test]
 fn test_struct_with_padding() {

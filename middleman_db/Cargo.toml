@@ -6,9 +6,9 @@ edition = "2021"
 [dependencies]
 bitflags = "2.8.0"
 bytecast = { version = "0.1.0", path = "../bytecast" }
-bytecast_derive = { version = "0.1.0", path = "../bytecast_derive" }
 byteorder = "1.5.0"
 byteview = "0.5.3"
+cast = { version = "0.1.0", path = "../cast" }
 dashmap = "6.1.0"
 log = "0.4.25"
 owning_ref = "0.4.1"

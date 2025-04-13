@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use bytecast::{FromBytes, IntoBytes};
-use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+use bytecast::{FromBytes, HasLayout, IntoBytes};
 use chrono::{Datelike, Timelike, Utc};
 use middleman_db::key::{BigEndianU32, BigEndianU64, Packed2};
 use middleman_db::prefix::IsPrefixOf;

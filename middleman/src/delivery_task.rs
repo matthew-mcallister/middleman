@@ -2,12 +2,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use cast::cast_from;
 use http::{HeaderValue, Request};
 use middleman_db::Transaction;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::api::to_json::{cast, ConsumerApiSerializer, JsonFormatter};
+use crate::api::to_json::{ConsumerApiSerializer, JsonFormatter};
 use crate::delivery::Delivery;
 use crate::error::{Error, ErrorKind, Result};
 use crate::event::Event;
@@ -59,13 +60,14 @@ impl DeliveryTask {
         let subscriber_id = self.delivery.subscriber_id();
         let mut txn = self.transaction;
 
-        let body = cast::<_, &JsonFormatter<_>>(cast::<_, &ConsumerApiSerializer<_>>(&*self.event));
+        let body = cast_from::<&JsonFormatter<_>, _>(cast_from::<&ConsumerApiSerializer<_>, _>(
+            &*self.event,
+        ));
         let mut request = Request::new(body.to_string());
         *request.method_mut() = http::Method::POST;
-        request.headers_mut().insert(
-            "Content-Type",
-            HeaderValue::from_str("application/json").unwrap(),
-        );
+        request
+            .headers_mut()
+            .insert("Content-Type", HeaderValue::from_str("application/json").unwrap());
         let timestamp: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
         timestamp_and_sign_request(timestamp.into(), self.subscriber.hmac_key(), &mut request);
 

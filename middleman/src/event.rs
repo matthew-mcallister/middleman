@@ -2,8 +2,7 @@ use std::borrow::Cow;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use bytecast::IntoBytes;
-use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+use bytecast::{FromBytes, HasLayout, IntoBytes};
 use db::big_tuple::{big_tuple, BigTuple};
 use db::key::{packed, BigEndianU64, Packed2, Packed3};
 use db::model::big_tuple_struct;

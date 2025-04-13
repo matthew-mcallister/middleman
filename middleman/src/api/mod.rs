@@ -4,10 +4,11 @@ use axum::extract::Query;
 use axum::response::IntoResponse;
 use axum::routing::{post, put, Router};
 use axum::Json;
+use cast::cast_from;
 use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
-use to_json::{cast, JsonFormatter, ProducerApiSerializer};
+use to_json::{JsonFormatter, ProducerApiSerializer};
 use url::Url;
 use uuid::Uuid;
 
@@ -90,10 +91,8 @@ pub fn router(app: Arc<Application>) -> Router {
                 async move |Json(event): Json<PostEvent>| -> Result<_> {
                     let event: EventBuilder<'_> = (&event).into();
                     let event = app.create_event(event)?;
-                    Ok(
-                        JsonFormatter(cast::<_, Box<ProducerApiSerializer<_>>>(event))
-                            .into_response(),
-                    )
+                    Ok(JsonFormatter(cast_from::<Box<ProducerApiSerializer<_>>, _>(event))
+                        .into_response())
                 }
             })
             .get({
@@ -112,7 +111,7 @@ pub fn router(app: Arc<Application>) -> Router {
                             .take(max_results as _)
                             .collect()
                     };
-                    let events: Vec<Box<ProducerApiSerializer<_>>> = cast(events?);
+                    let events: Vec<Box<ProducerApiSerializer<_>>> = cast_from(events?);
                     Ok(JsonFormatter(events))
                 }
             }),
@@ -124,7 +123,7 @@ pub fn router(app: Arc<Application>) -> Router {
                 async move |Json(request): Json<PutSubscriber>| -> Result<_> {
                     let builder: SubscriberBuilder = request.try_into()?;
                     let subscriber = app.create_subscriber(builder)?;
-                    let subscriber: Box<ProducerApiSerializer<_>> = cast(subscriber);
+                    let subscriber: Box<ProducerApiSerializer<_>> = cast_from(subscriber);
                     Ok(Json(subscriber))
                 }
             })
@@ -136,7 +135,7 @@ pub fn router(app: Arc<Application>) -> Router {
                     } else {
                         app.subscribers.iter().collect()
                     };
-                    let subscribers: Vec<Box<ProducerApiSerializer<_>>> = cast(subscribers?);
+                    let subscribers: Vec<Box<ProducerApiSerializer<_>>> = cast_from(subscribers?);
                     Ok(Json(subscribers))
                 }
             }),

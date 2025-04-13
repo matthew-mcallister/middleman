@@ -1,8 +1,7 @@
 //! Implements some helpers for working with key data.
 
 use bytecast::layout::{HasLayout, Layout};
-use bytecast::{FromBytes, IntoBytes};
-use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+use bytecast::{FromBytes, HasLayout, IntoBytes};
 
 use crate::prefix::IsPrefixOf;
 
@@ -162,8 +161,7 @@ impl_bytes_as_prefix_of_packed_tuple!(Packed6<T, U, V, W, X, Y>);
 
 #[cfg(test)]
 mod tests {
-    use bytecast::{FromBytes, IntoBytes};
-    use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+    use bytecast::{FromBytes, HasLayout, IntoBytes};
 
     use super::*;
 

@@ -285,6 +285,9 @@ checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
 [[package]]
 name = "bytecast"
 version = "0.1.0"
+dependencies = [
+ "bytecast_derive",
+]
 
 [[package]]
 name = "bytecast_derive"
@@ -328,6 +331,23 @@ checksum = "225bff33b2141874fe80d71e07d6eec4f85c5c216453dd96388240f96e1acc14"
 dependencies = [
  "cc",
  "pkg-config",
+]
+
+[[package]]
+name = "cast"
+version = "0.1.0"
+dependencies = [
+ "cast_derive",
+]
+
+[[package]]
+name = "cast_derive"
+version = "0.1.0"
+dependencies = [
+ "cast",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1387,9 +1407,9 @@ dependencies = [
  "axum",
  "bitflags",
  "bytecast",
- "bytecast_derive",
  "byteorder",
  "byteview",
+ "cast",
  "chrono",
  "clap",
  "compact_str",
@@ -1436,9 +1456,9 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "bytecast",
- "bytecast_derive",
  "byteorder",
  "byteview",
+ "cast",
  "dashmap",
  "log",
  "owning_ref",

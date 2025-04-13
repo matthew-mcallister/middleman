@@ -2,6 +2,8 @@ use layout::HasLayout;
 
 pub mod layout;
 
+pub use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FromBytesError {
     InvalidSize,

@@ -1,6 +1,7 @@
 use quote::quote;
 use syn::{Ident, ItemStruct, parse_macro_input};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Repr {
     Packed,
     C,

@@ -1,6 +1,5 @@
 use bitflags::bitflags;
-use bytecast::{box_from_bytes, FromBytes};
-use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
+use bytecast::{box_from_bytes, FromBytes, HasLayout, IntoBytes};
 
 use crate::prefix::IsPrefixOf;
 

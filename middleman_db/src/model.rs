@@ -7,8 +7,8 @@ macro_rules! big_tuple_struct {
         }
     ) => {
         $(#[$($meta)*])*
-        #[derive(bytecast_derive::FromBytes, bytecast_derive::IntoBytes, bytecast_derive::HasLayout)]
-        #[repr(C)]
+        #[derive(::bytecast::FromBytes, ::bytecast::IntoBytes, ::bytecast::HasLayout, ::cast::Cast)]
+        #[repr(transparent)]
         $vis struct $Name($crate::big_tuple::BigTuple);
 
         impl $Name {
@@ -20,7 +20,7 @@ macro_rules! big_tuple_struct {
                 info.aligned = true;
                 info.fields = fields;
                 let tuple = $crate::big_tuple::BigTuple::new(info);
-                unsafe { std::mem::transmute(tuple) }
+                ::cast::cast_from(tuple)
             }
 
             $(
@@ -57,7 +57,7 @@ macro_rules! big_tuple_struct {
             type Owned = Box<Self>;
 
             fn to_owned(&self) -> Box<Self> {
-                unsafe { std::mem::transmute(self.0.to_owned()) }
+                ::cast::cast_from(self.0.to_owned())
             }
         }
     };
