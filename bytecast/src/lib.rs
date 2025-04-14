@@ -1,7 +1,11 @@
+extern crate self as bytecast;
+
 pub mod layout;
+pub mod unalign;
 
 pub use bytecast_derive::{FromBytes, HasLayout, IntoBytes};
 pub use layout::{HasLayout, Layout};
+pub use unalign::Unalign;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FromBytesError {

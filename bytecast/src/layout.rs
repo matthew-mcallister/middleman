@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 
 use crate::FromBytesError;

@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
-use cast::{cast, cast_from, Cast};
+use cast::{cast_from, Cast};
 use http::HeaderValue;
 use serde::Serialize;
 

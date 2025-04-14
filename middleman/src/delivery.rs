@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bytecast::{FromBytes, HasLayout, IntoBytes};
+use bytecast::{FromBytes, HasLayout, IntoBytes, Unalign};
 use chrono::{Datelike, Timelike, Utc};
 use middleman_db::key::{BigEndianU32, BigEndianU64, Packed2};
 use middleman_db::prefix::IsPrefixOf;
@@ -61,11 +61,7 @@ impl From<chrono::DateTime<Utc>> for DateTime {
         let yof = u32::try_from(year).unwrap() << 9 | day;
         let seconds = value.num_seconds_from_midnight();
         let nanos = value.nanosecond();
-        DateTime {
-            yof,
-            seconds,
-            nanos,
-        }
+        DateTime { yof, seconds, nanos }
     }
 }
 
@@ -135,11 +131,7 @@ impl NextAttemptKey {
     }
 
     fn timestamp(&self) -> DateTime {
-        DateTime {
-            yof: self.yof.into(),
-            seconds: self.seconds.into(),
-            nanos: self.nanos.into(),
-        }
+        DateTime { yof: self.yof.into(), seconds: self.seconds.into(), nanos: self.nanos.into() }
     }
 }
 
@@ -154,13 +146,10 @@ impl DeliveryTable {
         let cf = db.get_column_family(ColumnFamilyName::Deliveries.name()).unwrap();
         let next_attempt_index =
             db.get_column_family(ColumnFamilyName::DeliveryNextAttemptIndex.name()).unwrap();
-        Ok(Self {
-            cf,
-            next_attempt_index,
-        })
+        Ok(Self { cf, next_attempt_index })
     }
 
-    fn accessor<'a>(&'a self) -> Accessor<'a, DeliveryKey, Delivery> {
+    fn accessor<'a>(&'a self) -> Accessor<'a, DeliveryKey, Unalign<Delivery>> {
         Accessor::new(&self.cf)
     }
 
@@ -189,7 +178,7 @@ impl DeliveryTable {
         self.accessor().put_txn(
             txn,
             &packed!(event_id.into(), subscriber_id.into_bytes()),
-            &delivery,
+            &Unalign(delivery),
         );
         let index_key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().put_txn(txn, &index_key, &());
@@ -197,13 +186,16 @@ impl DeliveryTable {
     }
 
     pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> Result<Option<Delivery>> {
-        Ok(self.accessor().get(&(event_id.into(), subscriber_id.into_bytes()).into())?.map(|x| *x))
+        Ok(self
+            .accessor()
+            .get(&(event_id.into(), subscriber_id.into_bytes()).into())?
+            .map(|x| x.into_inner()))
     }
 
     pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = Result<Delivery>> + 'a {
         let mut cursor = self.accessor().cursor();
         cursor.seek_to_first();
-        cursor.values().map(|r| r.map_err(Into::into))
+        cursor.values().map(|r| r.map(Unalign::into_inner).map_err(Into::into))
     }
 
     pub(crate) fn iter_by_next_attempt_skip_locked<'a>(
@@ -232,11 +224,7 @@ impl DeliveryTable {
                     return None;
                 }
 
-                let NextAttemptKey {
-                    subscriber_id,
-                    event_id,
-                    ..
-                } = key;
+                let NextAttemptKey { subscriber_id, event_id, .. } = key;
                 let key: DeliveryKey = packed!(event_id, subscriber_id);
                 let transaction =
                     self.db().begin_transaction_locked(&self.cf, IntoBytes::as_bytes(&key));
@@ -285,7 +273,7 @@ impl DeliveryTable {
 
         // Insert new data
         let key = packed!(delivery.event_id.into(), delivery.subscriber_id);
-        self.accessor().put_txn(txn, &key, delivery);
+        self.accessor().put_txn(txn, &key, Unalign::from_ref(delivery));
         let key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().put_txn(txn, &key, &());
     }
