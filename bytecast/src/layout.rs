@@ -77,8 +77,12 @@ pub const fn compute_layout_packed(fields: &[Layout]) -> Layout {
     }
 }
 
-/// Calculates the layout of a type from its member fields.
 pub const fn compute_layout(fields: &[Layout]) -> Layout {
+    compute_layout_with_alignment(fields, 1)
+}
+
+/// Calculates the layout of a type from its member fields.
+pub const fn compute_layout_with_alignment(fields: &[Layout], min_alignment: usize) -> Layout {
     const fn align_up(alignment: usize, offset: usize) -> usize {
         ((offset + alignment - 1) / alignment) * alignment
     }
@@ -108,6 +112,8 @@ pub const fn compute_layout(fields: &[Layout]) -> Layout {
         }
         i += 1;
     }
+    let min_alignment = 1 << min_alignment.ilog2();
+    let alignment = if alignment >= min_alignment { alignment } else { min_alignment };
     let size = if tail_stride > 0 {
         // Size is just tail offset
         offset

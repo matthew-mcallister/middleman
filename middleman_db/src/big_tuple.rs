@@ -275,20 +275,14 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let info = BigTupleCreateInfo {
-            fields: &[],
-            ..Default::default()
-        };
+        let info = BigTupleCreateInfo { fields: &[], ..Default::default() };
         let tuple = BigTuple::new(info);
         assert_eq!(tuple.len(), 0);
     }
 
     #[test]
     fn test_unaligned_small() {
-        let info = BigTupleCreateInfo {
-            fields: &[b"hello", b"world"],
-            ..Default::default()
-        };
+        let info = BigTupleCreateInfo { fields: &[b"hello", b"world"], ..Default::default() };
         let tuple = BigTuple::new(info);
         assert_eq!(tuple.len(), 2);
         assert_eq!(tuple.get(0), b"hello");
@@ -299,20 +293,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_out_of_bounds() {
-        let info = BigTupleCreateInfo {
-            fields: &[b"hello", b"world"],
-            ..Default::default()
-        };
+        let info = BigTupleCreateInfo { fields: &[b"hello", b"world"], ..Default::default() };
         let tuple = BigTuple::new(info);
         tuple.get(2);
     }
 
     #[test]
     fn test_unaligned_big() {
-        let info = BigTupleCreateInfo {
-            fields: &[&[0; 67890], &[1; 67890]],
-            ..Default::default()
-        };
+        let info = BigTupleCreateInfo { fields: &[&[0; 67890], &[1; 67890]], ..Default::default() };
         let tuple = BigTuple::new(info);
         assert_eq!(tuple.len(), 2);
         assert_eq!(tuple.get(0), &[0; 67890]);
@@ -321,11 +309,8 @@ mod tests {
 
     #[test]
     fn test_aligned_small() {
-        let info = BigTupleCreateInfo {
-            fields: &[b"foo", b"bar"],
-            aligned: true,
-            ..Default::default()
-        };
+        let info =
+            BigTupleCreateInfo { fields: &[b"foo", b"bar"], aligned: true, ..Default::default() };
         let tuple = BigTuple::new(info);
         assert_eq!(tuple.len(), 2);
         assert_eq!(tuple.get(0), b"foo");

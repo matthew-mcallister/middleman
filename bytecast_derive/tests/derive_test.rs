@@ -88,3 +88,36 @@ fn test_generic() {
     assert_eq!(b, 2);
     assert_eq!(pair.as_bytes(), bytes);
 }
+
+#[test]
+fn test_zst() {
+    #[derive(HasLayout)]
+    #[repr(C)]
+    struct Struct {
+        a: u8,
+        b: [u32; 0],
+    }
+
+    assert_eq!(Struct::LAYOUT.size, 4);
+    assert_eq!(Struct::LAYOUT.alignment.get(), 4);
+}
+
+#[test]
+fn test_repr_align() {
+    #[derive(HasLayout)]
+    #[repr(C, align(4))]
+    struct Struct {
+        a: u8,
+    }
+
+    #[derive(HasLayout)]
+    #[repr(C)]
+    #[repr(align(4))]
+    struct Struct2 {
+        a: u8,
+    }
+
+    assert_eq!(Struct::LAYOUT.size, 4);
+    assert_eq!(Struct::LAYOUT.alignment.get(), 4);
+    assert_eq!(Struct2::LAYOUT, Struct::LAYOUT);
+}

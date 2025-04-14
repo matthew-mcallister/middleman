@@ -1,5 +1,5 @@
 use quote::quote;
-use syn::{Ident, ItemStruct, parse_macro_input};
+use syn::{ItemStruct, LitInt, parenthesized, parse_macro_input};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Repr {
@@ -8,19 +8,58 @@ enum Repr {
     Transparent,
 }
 
-fn get_repr(input: &ItemStruct) -> Option<Repr> {
-    for attr in input.attrs.iter() {
+fn parse_repr_attrs(input: &syn::ItemStruct) -> Option<(Repr, Option<usize>)> {
+    let mut repr: Option<Repr> = None;
+    let mut alignment: Option<usize> = None;
+
+    for attr in &input.attrs {
         if attr.path().is_ident("repr") {
-            let ident: Ident = attr.parse_args().ok()?;
-            return match ident.to_string().as_ref() {
-                "C" => Some(Repr::C),
-                "packed" => Some(Repr::Packed),
-                "transparent" => Some(Repr::Transparent),
-                _ => None,
-            };
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("C") {
+                    assert!(repr.is_none(), "invalid repr");
+                    repr = Some(Repr::C);
+                    return Ok(());
+                }
+
+                if meta.path.is_ident("transparent") {
+                    assert!(repr.is_none(), "invalid repr");
+                    repr = Some(Repr::Transparent);
+                    return Ok(());
+                }
+
+                if meta.path.is_ident("align") {
+                    assert!(alignment.is_none(), "invalid repr");
+                    let content;
+                    parenthesized!(content in meta.input);
+                    let lit: LitInt = content.parse()?;
+                    let n: usize = lit.base10_parse()?;
+                    alignment = Some(n);
+                    return Ok(());
+                }
+
+                if meta.path.is_ident("packed") {
+                    assert!(repr.is_none(), "invalid repr");
+                    if meta.input.peek(syn::token::Paren) {
+                        panic!("unsupported repr");
+                    } else {
+                        repr = Some(Repr::Packed);
+                    }
+                    return Ok(());
+                }
+
+                Err(meta.error("invalid repr"))
+            })
+            .expect("invalid repr");
         }
     }
-    None
+
+    let repr = repr?;
+    match repr {
+        Repr::Packed | Repr::Transparent if alignment.is_some() => panic!("unsupported repr"),
+        _ => {},
+    }
+
+    Some((repr, alignment))
 }
 
 #[proc_macro_derive(HasLayout)]
@@ -32,7 +71,9 @@ pub fn derive_has_layout(input: proc_macro::TokenStream) -> proc_macro::TokenStr
     let extra_predicates = where_clause.map(|c| &c.predicates);
     let name = &input.ident;
 
-    let repr = get_repr(&input).expect("repr must be one of: C, packed, transparent");
+    let (repr, min_align) =
+        parse_repr_attrs(&input).expect("repr must be one of: C, packed, transparent");
+    let min_align = min_align.unwrap_or(1);
     let field_types_vec: Vec<_> = match &input.fields {
         syn::Fields::Named(fs) => fs.named.iter().map(|field| &field.ty).collect(),
         syn::Fields::Unnamed(fs) => fs.unnamed.iter().map(|field| &field.ty).collect(),
@@ -50,9 +91,9 @@ pub fn derive_has_layout(input: proc_macro::TokenStream) -> proc_macro::TokenStr
             {
                 type DestructuredPointer = <#tail_type as ::bytecast::layout::HasLayout>::DestructuredPointer;
 
-                const LAYOUT: ::bytecast::layout::Layout = ::bytecast::layout::compute_layout(&[
+                const LAYOUT: ::bytecast::layout::Layout = ::bytecast::layout::compute_layout_with_alignment(&[
                     #(<#field_types as ::bytecast::layout::HasLayout>::LAYOUT,)*
-                ]);
+                ], #min_align);
             }
         },
         Repr::Packed => quote! {
