@@ -18,7 +18,7 @@ pub struct Layout {
 /// Allows constructing a pointer in a way that is generic over the pointer
 /// layout. This is implemented by `usize` for thin pointers and `(usize,
 /// usize)` for fat pointers.
-pub trait DestructuredPointer {
+pub trait DestructuredPointer: Copy {
     fn to_address_and_len(self) -> (usize, usize);
     fn from_address_and_len(address: usize, len: usize) -> Self;
 }

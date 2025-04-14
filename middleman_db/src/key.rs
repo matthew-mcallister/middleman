@@ -1,6 +1,5 @@
 //! Implements some helpers for working with key data.
 
-use bytecast::layout::{HasLayout, Layout};
 use bytecast::{FromBytes, HasLayout, IntoBytes};
 
 use crate::prefix::IsPrefixOf;
@@ -60,7 +59,7 @@ big_endian_int!(BigEndianI64, i64);
 
 macro_rules! impl_packed_tuple {
     ($PackedN:ident, $($T:ident),*$(,)?) => {
-        #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        #[derive(Clone, Copy, Debug, Eq, FromBytes, HasLayout, IntoBytes, Ord, PartialEq, PartialOrd)]
         #[repr(packed)]
         pub struct $PackedN<$($T,)*>($(pub $T,)*);
 
@@ -77,43 +76,27 @@ macro_rules! impl_packed_tuple {
                 ($($T),*)
             }
         }
-
-        unsafe impl<$($T: HasLayout,)*> HasLayout for $PackedN<$($T,)*> {
-            type DestructuredPointer = usize;
-
-            const LAYOUT: Layout = bytecast::layout::compute_layout_packed(&[$(<$T as HasLayout>::LAYOUT,)*]);
-        }
-
-        impl<$($T: HasLayout + FromBytes,)*> FromBytes for $PackedN<$($T,)*> {
-            fn ref_from_bytes(bytes: &[u8]) -> Result<&Self, bytecast::FromBytesError> {
-                let destructured = bytecast::layout::destructured_pointer_from_bytes::<Self>(bytes)?;
-                unsafe {
-                    let ptr: *const Self = std::mem::transmute(destructured);
-                    Ok(&*ptr)
-                }
-            }
-
-            fn mut_from_bytes(bytes: &mut [u8]) -> Result<&mut Self, bytecast::FromBytesError> {
-                let destructured = bytecast::layout::destructured_pointer_from_bytes::<Self>(bytes)?;
-                unsafe {
-                    let ptr: *mut Self = std::mem::transmute(destructured);
-                    Ok(&mut *ptr)
-                }
-            }
-        }
-
-        impl<$($T: HasLayout + IntoBytes,)*> IntoBytes for $PackedN<$($T,)*> {
-            fn as_bytes(&self) -> &[u8] {
-                unsafe {
-                    let destructured: <Self as ::bytecast::layout::HasLayout>::DestructuredPointer = std::mem::transmute(self);
-                    &*::bytecast::layout::bytes_from_destructured_pointer::<Self>(destructured)
-                }
-            }
-        }
     };
 }
 
-impl_packed_tuple!(Packed2, T, U);
+#[derive(Clone, Copy, Debug, Eq, FromBytes, HasLayout, IntoBytes, Ord, PartialEq, PartialOrd)]
+#[repr(packed)]
+pub struct Packed2<T1, T2>(pub T1, pub T2);
+
+#[allow(non_snake_case)]
+impl<T1, T2> From<(T1, T2)> for Packed2<T1, T2> {
+    fn from((t1, t2): (T1, T2)) -> Self {
+        Self(t1, t2)
+    }
+}
+
+#[allow(non_snake_case)]
+impl<T1, T2> From<Packed2<T1, T2>> for (T1, T2) {
+    fn from(Packed2(t1, t2): Packed2<T1, T2>) -> Self {
+        (t1, t2)
+    }
+}
+
 impl_packed_tuple!(Packed3, T, U, V);
 impl_packed_tuple!(Packed4, T, U, V, W);
 impl_packed_tuple!(Packed5, T, U, V, W, X);

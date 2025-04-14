@@ -74,3 +74,17 @@ fn test_tail_with_no_padding() {
     assert_eq!(&my_struct.b[..], &[(2, 3)]);
     assert_eq!(my_struct.as_bytes(), &bytes);
 }
+
+#[test]
+fn test_generic() {
+    #[derive(Debug, Eq, FromBytes, HasLayout, IntoBytes, PartialEq)]
+    #[repr(packed)]
+    struct Pair<T, U>(T, U);
+
+    let bytes: [u8; 3] = [1, 2, 0];
+    let pair: &Pair<u8, u16> = Pair::ref_from_bytes(&bytes[..]).unwrap();
+    let Pair(a, b) = *pair;
+    assert_eq!(a, 1);
+    assert_eq!(b, 2);
+    assert_eq!(pair.as_bytes(), bytes);
+}
