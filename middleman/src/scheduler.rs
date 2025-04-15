@@ -25,10 +25,7 @@ where
     [T; N]: Default,
 {
     fn default() -> Self {
-        Self {
-            head: 0,
-            elems: Default::default(),
-        }
+        Self { head: 0, elems: Default::default() }
     }
 }
 
@@ -198,10 +195,7 @@ impl Scheduler {
         });
         self.unit_schedulers.insert(
             subscriber.id(),
-            UnitScheduler {
-                shared,
-                tasks_started_history: Default::default(),
-            },
+            UnitScheduler { shared, tasks_started_history: Default::default() },
         );
         debug!(?subscriber, "registered subscriber {}", subscriber.id());
     }

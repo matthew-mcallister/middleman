@@ -49,6 +49,7 @@ bytecast = { version = "0.1.0", path = "../bytecast" }
 cast = { version = "0.1.0", path = "../cast" }
 
 [dev-dependencies]
+reqwest = "0.12.15"
 statrs = "0.18.0"
 tempfile = "3.14.0"
 

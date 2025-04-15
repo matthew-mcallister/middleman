@@ -206,7 +206,7 @@ impl SubscriberBuilder {
     }
 
     pub fn max_connections(&mut self, max_connections: u16) -> &mut Self {
-        // TODO: Actually handle this field
+        // FIXME urgent: Actually handle this field
         self.max_connections = Some(max_connections);
         self
     }

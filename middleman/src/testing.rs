@@ -10,7 +10,9 @@ use compact_str::CompactString;
 use http::{Request, Response};
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
+use tracing::info;
 
+use crate::api::producer::router as producer_router;
 use crate::config::{Config, SqlIngestionOptions};
 use crate::connection::{Connection, ConnectionFactory, Http11ConnectionPool, Key};
 use crate::error::{Error, Result};
@@ -19,12 +21,14 @@ use crate::Application;
 
 #[derive(Default)]
 pub(crate) struct TestHarness {
+    pub(crate) config: Option<Box<Config>>,
     pub(crate) db_dir: Option<tempfile::TempDir>,
     pub(crate) application: Option<Arc<Application>>,
     pub(crate) connection_pool: Option<Http11ConnectionPool<CompactString, TestConnection>>,
     pub(crate) sqlite_db_url: Option<String>,
     pub(crate) sqlite_db: Option<sqlx::SqliteConnection>,
     pub(crate) sql_ingestor: Option<SqlIngestor>,
+    pub(crate) producer_api_url: Option<String>,
 }
 
 impl TestHarness {
@@ -50,21 +54,30 @@ impl TestHarness {
         self.db_dir.as_ref().map(|d| d.path()).unwrap()
     }
 
-    pub fn application(&mut self) -> &Arc<Application> {
-        if self.application.is_some() {
-            return self.application.as_mut().unwrap();
+    pub fn config(&mut self) -> &mut Box<Config> {
+        if self.config.is_some() {
+            return self.config.as_mut().unwrap();
         }
 
         let db_dir = self.db_dir().to_owned();
         let config = Box::new(Config {
             db_dir,
             host: IpAddr::from_str("127.0.0.1").unwrap(),
-            port: Default::default(),
+            port: 10707,
             ingestion_db_url: None,
             ingestion_db_table: None,
+            producer_api_bearer_token: None,
         });
-        self.application = Some(Arc::new(Application::new(config).unwrap()));
+        self.config = Some(config);
+        self.config.as_mut().unwrap()
+    }
 
+    pub fn application(&mut self) -> &Arc<Application> {
+        if self.application.is_some() {
+            return self.application.as_mut().unwrap();
+        }
+
+        self.application = Some(Arc::new(Application::new(self.config().clone()).unwrap()));
         self.application.as_ref().unwrap()
     }
 
@@ -101,7 +114,9 @@ impl TestHarness {
         let options = sqlx::sqlite::SqliteConnectOptions::from_str(self.sqlite_db_url())
             .unwrap()
             .create_if_missing(true);
-        let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
 
         #[rustfmt::skip]
         sqlx::query(r"
@@ -132,6 +147,26 @@ impl TestHarness {
         };
         self.sql_ingestor = Some(SqlIngestor::new(app, options).await.unwrap());
         self.sql_ingestor.as_mut().unwrap()
+    }
+
+    pub async fn producer_api(&mut self) -> &str {
+        if self.producer_api_url.is_some() {
+            return self.producer_api_url.as_ref().unwrap().as_ref();
+        }
+
+        let app = self.application();
+        let router = producer_router(Arc::clone(app));
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        info!("Listening on {}", addr);
+
+        tokio::spawn(async { axum::serve(listener, router).await.unwrap() });
+
+        self.producer_api_url = Some(format!("http://{addr}"));
+        self.producer_api_url.as_ref().unwrap()
     }
 }
 
@@ -189,7 +224,7 @@ impl ConnectionFactory for TestConnectionFactory {
     }
 }
 
-// Used in some http unit test
+// Used in some http unit tests
 pub(crate) async fn http_server<F, S>(f: F) -> Result<(u16, impl Future<Output: Send> + Send)>
 where
     S: Future<Output = Result<Response<String>>> + Send,

@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
 
     let config = middleman::config::load_config()?;
     let app = Arc::new(Application::new(config.clone())?);
-    let router = middleman::api::router(Arc::clone(&app));
+    let router = middleman::api::producer::router(Arc::clone(&app));
 
     let ref_time = tokio::time::Instant::now();
     let period = 0.2;

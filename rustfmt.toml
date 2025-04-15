@@ -1,4 +1,6 @@
 match_block_trailing_comma = true
 use_small_heuristics = "Max"
 single_line_if_else_max_width = 60
+struct_lit_width = 18
+chain_width = 60
 imports_granularity = "Module"
