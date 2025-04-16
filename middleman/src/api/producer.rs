@@ -10,6 +10,7 @@ use cast::cast_from;
 use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::warn;
 use url::Url;
 use uuid::Uuid;
 
@@ -169,10 +170,14 @@ pub fn router(app: Arc<Application>) -> Router {
             }),
             // XXX: delete
         );
+
     if app.config.producer_api_bearer_token.is_some() {
         router = router
             .layer(axum::middleware::from_fn_with_state(Arc::clone(&app), bearer_auth_middleware));
+    } else {
+        warn!("producer API bearer token not present; requests will not be authenticated")
     }
+
     router
 }
 

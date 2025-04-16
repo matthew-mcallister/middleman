@@ -20,6 +20,7 @@ pub(crate) enum ErrorKind {
     Busy,
     Unexpected,
     Unauthenticated,
+    Forbidden,
     NotFound,
     NetworkError,
 }
@@ -33,6 +34,7 @@ impl ErrorKind {
             Self::Busy => 409,
             Self::Unexpected => 500,
             Self::Unauthenticated => 401,
+            Self::Forbidden => 403,
             Self::NotFound => 404,
             // Not sure if 502 makes the most sense here
             Self::NetworkError => 502,
@@ -48,6 +50,7 @@ impl std::fmt::Display for ErrorKind {
             Self::Busy => write!(f, "busy, try again"),
             Self::Unexpected => write!(f, "internal error"),
             Self::Unauthenticated => write!(f, "unauthenticated"),
+            Self::Forbidden => write!(f, "forbidden"),
             Self::NotFound => write!(f, "not found"),
             Self::NetworkError => write!(f, "network request failed"),
         }
@@ -110,6 +113,7 @@ define_errors! {
     sqlx::Error => ErrorKind::Unexpected,
     uuid::Error => ErrorKind::InvalidInput,
     http::header::ToStrError => ErrorKind::InvalidInput,
+    jsonwebtoken::errors::Error => ErrorKind::Unauthenticated,
 }
 
 impl<'a> From<&'a str> for Box<Error> {

@@ -13,7 +13,10 @@ pub struct Config {
     pub port: u16,
     pub ingestion_db_url: Option<String>,
     pub ingestion_db_table: Option<String>,
+    /// Optional bearer token to authenticate producer API requests
     pub producer_api_bearer_token: Option<String>,
+    /// Secret key used to authenticate consumer API auth JWTs
+    pub consumer_auth_secret: Option<String>,
 }
 
 pub fn load_config() -> Result<Box<Config>> {
@@ -26,6 +29,7 @@ pub fn load_config() -> Result<Box<Config>> {
         ingestion_db_url: std::env::var("MIDDLEMAN_INGESTION_DB_URL").ok(),
         ingestion_db_table: std::env::var("MIDDLEMAN_INGESTION_DB_TABLE").ok(),
         producer_api_bearer_token: std::env::var("MIDDLEMAN_PRODUCER_API_BEARER_TOKEN").ok(),
+        consumer_auth_secret: std::env::var("MIDDLEMAN_CONSUMER_AUTH_SECRET").ok(),
     }))
 }
 

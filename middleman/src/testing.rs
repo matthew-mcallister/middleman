@@ -11,7 +11,10 @@ use http::{Request, Response};
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
 use tracing::info;
+use uuid::Uuid;
 
+use crate::api::auth::Claims;
+use crate::api::consumer::router as consumer_router;
 use crate::api::producer::router as producer_router;
 use crate::config::{Config, SqlIngestionOptions};
 use crate::connection::{Connection, ConnectionFactory, Http11ConnectionPool, Key};
@@ -29,7 +32,10 @@ pub(crate) struct TestHarness {
     pub(crate) sqlite_db: Option<sqlx::SqliteConnection>,
     pub(crate) sql_ingestor: Option<SqlIngestor>,
     pub(crate) producer_api_url: Option<String>,
+    pub(crate) consumer_api_url: Option<String>,
 }
+
+const CONSUMER_AUTH_SECRET: &'static str = "test_key";
 
 impl TestHarness {
     pub fn new() -> Self {
@@ -67,6 +73,7 @@ impl TestHarness {
             ingestion_db_url: None,
             ingestion_db_table: None,
             producer_api_bearer_token: None,
+            consumer_auth_secret: Some(CONSUMER_AUTH_SECRET.to_owned()),
         });
         self.config = Some(config);
         self.config.as_mut().unwrap()
@@ -167,6 +174,32 @@ impl TestHarness {
 
         self.producer_api_url = Some(format!("http://{addr}"));
         self.producer_api_url.as_ref().unwrap()
+    }
+
+    pub async fn consumer_api(&mut self) -> &str {
+        if self.consumer_api_url.is_some() {
+            return self.consumer_api_url.as_ref().unwrap().as_ref();
+        }
+
+        let app = self.application();
+        let router = consumer_router(Arc::clone(app)).unwrap();
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        info!("Listening on {}", addr);
+
+        tokio::spawn(async { axum::serve(listener, router).await.unwrap() });
+
+        self.consumer_api_url = Some(format!("http://{addr}"));
+        self.consumer_api_url.as_ref().unwrap()
+    }
+
+    pub fn consumer_auth_token(&self, subject: String) -> String {
+        let key = jsonwebtoken::EncodingKey::from_secret(CONSUMER_AUTH_SECRET.as_bytes());
+        let claims = Claims { sub: subject };
+        jsonwebtoken::encode(&Default::default(), &claims, &key).unwrap()
     }
 }
 

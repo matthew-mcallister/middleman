@@ -47,6 +47,7 @@ tracing-subscriber = "0.3.19"
 tower-http = { version = "0.6.2", features = ["trace"] }
 bytecast = { version = "0.1.0", path = "../bytecast" }
 cast = { version = "0.1.0", path = "../cast" }
+jsonwebtoken = "9.3.1"
 
 [dev-dependencies]
 reqwest = "0.12.15"
