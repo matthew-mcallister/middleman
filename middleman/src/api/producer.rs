@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put, Router};
 use axum::Json;
 use cast::cast_from;
+use http::StatusCode;
 use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,6 +92,13 @@ struct PutSubscriber {
 #[derive(Serialize, Deserialize)]
 struct ListSubscribers {
     tag: Option<Uuid>,
+    id: Option<Uuid>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DeleteSubscriber {
+    tag: Uuid,
+    id: Uuid,
 }
 
 impl TryFrom<PutSubscriber> for SubscriberBuilder {
@@ -159,16 +167,29 @@ pub fn router(app: Arc<Application>) -> Router {
             .get({
                 let app = Arc::clone(&app);
                 async move |query: Query<ListSubscribers>| -> Result<_> {
-                    let subscribers: Result<Vec<_>> = if let Some(tag) = query.tag {
-                        app.subscribers.iter_by_tag(tag).collect()
+                    let subscribers: Result<Vec<_>> = if let Some(id) = query.id {
+                        let tag = query
+                            .tag
+                            .ok_or(Error::with_cause(ErrorKind::InvalidInput, "missing tag"))?;
+                        Ok(app.subscribers.get(tag, id)?.into_iter().collect())
                     } else {
-                        app.subscribers.iter().collect()
+                        if let Some(tag) = query.tag {
+                            app.subscribers.iter_by_tag(tag).collect()
+                        } else {
+                            app.subscribers.iter().collect()
+                        }
                     };
                     let subscribers: Vec<Box<ProducerApiSerializer<_>>> = cast_from(subscribers?);
                     Ok(Json(subscribers))
                 }
+            })
+            .delete({
+                let app = Arc::clone(&app);
+                async move |Query(query): Query<DeleteSubscriber>| -> Result<_> {
+                    app.delete_subscriber(query.tag, query.id)?;
+                    Ok(StatusCode::from_u16(200).unwrap())
+                }
             }),
-            // XXX: delete
         );
 
     if app.config.producer_api_bearer_token.is_some() {
@@ -184,8 +205,9 @@ pub fn router(app: Arc<Application>) -> Router {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use uuid::uuid;
 
-    use crate::testing::TestHarness;
+    use crate::testing::{check_status, TestHarness};
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_events() {
@@ -199,31 +221,26 @@ mod tests {
             "stream": "stream:0",
             "payload": {"hello": "world"},
         });
-        let response = client
-            .post(format!("{url}/events"))
-            .body(body.to_string())
-            .header("Content-Type", "application/json")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
+        check_status!(
+            200,
+            client
+                .post(format!("{url}/events"))
+                .body(body.to_string())
+                .header("Content-Type", "application/json"),
+        );
 
-        let response = client
-            .get(format!("{url}/events?tag=efd9fd38-73e2-4bb3-a5ab-f948738568af"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
-        let body: serde_json::Value =
-            serde_json::from_str(&response.text().await.unwrap()).unwrap();
-        let expected_body = json!([{
+        let response = check_status!(
+            200,
+            client.get(format!("{url}/events?tag=efd9fd38-73e2-4bb3-a5ab-f948738568af")),
+        );
+        let expected = json!([{
             "id": 1,
             "tag": "efd9fd38-73e2-4bb3-a5ab-f948738568af",
             "idempotency_key": "3ed5a219-e0e0-46af-bd8d-86d7380dc9da",
             "stream": "stream:0",
             "payload": {"hello": "world"},
         }]);
-        assert_eq!(body, expected_body);
+        assert_eq!(response, Some(expected));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -236,31 +253,212 @@ mod tests {
         let url = format!("{url}/events?tag=3c9bd902-cf3d-4ba0-b757-acce3bb8c345");
         let client = reqwest::Client::new();
 
-        let response = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {secret}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
+        check_status!(200, client.get(&url).header("Authorization", format!("Bearer {secret}")));
+        check_status!(401, client.get(&url));
+        check_status!(401, client.get(&url).header("Authorization", "blah"));
+        check_status!(401, client.get(&url).header("Authorization", "Bearer wrongkey"));
+    }
 
-        let response = client.get(&url).send().await.unwrap();
-        assert_eq!(response.status().as_u16(), 401);
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_subscribers() {
+        let mut harness = TestHarness::new();
+        let url = harness.producer_api().await;
+        let client = reqwest::Client::new();
 
-        let response = client
-            .get(&url)
-            .header("Authorization", "blah")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 401);
+        // Create two subscribers
+        let tag = uuid!("094ce043-4789-43d7-b9a8-dbee7b658276");
+        let id1 = uuid!("8187c0ef-7d63-4dd9-9dee-4b48730cd10a");
+        let body = json!({
+            "tag": tag,
+            "id": id1,
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook",
+            "max_connections": 5,
+            "hmac_key": "nosecret",
+        });
+        check_status!(
+            200,
+            client
+                .put(format!("{url}/subscribers"))
+                .body(body.to_string())
+                .header("Content-Type", "application/json"),
+        );
 
-        let response = client
-            .get(&url)
-            .header("Authorization", "Bearer wrongkey")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 401);
+        let id2 = uuid!("de9d7723-1a4d-48d4-8c6f-2a481fc8680b");
+        let body = json!({
+            "tag": tag,
+            "id": id2,
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook",
+            "max_connections": 5,
+            "hmac_key": "nosecret",
+        });
+        check_status!(
+            200,
+            client
+                .put(format!("{url}/subscribers"))
+                .body(body.to_string())
+                .header("Content-Type", "application/json"),
+        );
+
+        // List subscribers
+        let response = check_status!(200, client.get(format!("{url}/subscribers"))).unwrap();
+        let expected = json!([
+            {
+                "tag": tag,
+                "id": id1,
+                "stream_regex": ".*",
+                "destination_url": "https://example.com/webhook",
+                //"max_connections": 5,
+            },
+            {
+                "tag": tag,
+                "id": id2,
+                "stream_regex": ".*",
+                "destination_url": "https://example.com/webhook",
+                //"max_connections": 5,
+            },
+        ]);
+        assert_eq!(response, expected);
+
+        // Modify subscriber
+        let id2 = uuid!("de9d7723-1a4d-48d4-8c6f-2a481fc8680b");
+        let body = json!({
+            "tag": tag,
+            "id": id2,
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook2",
+            "max_connections": 5,
+            "hmac_key": "nosecret",
+        });
+        check_status!(
+            200,
+            client
+                .put(format!("{url}/subscribers"))
+                .body(body.to_string())
+                .header("Content-Type", "application/json")
+        );
+
+        // Get subscriber
+        let response =
+            check_status!(200, client.get(format!("{url}/subscribers?tag={tag}&id={id2}")))
+                .unwrap();
+        let expected = json!([{
+            "tag": tag,
+            "id": id2,
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook2",
+            //"max_connections": 5,
+        }]);
+        assert_eq!(response, expected);
+
+        // (with missing tag)
+        check_status!(400, client.get(format!("{url}/subscribers?id={id2}")));
+
+        // List by tag
+        let response =
+            check_status!(200, client.get(format!("{url}/subscribers?tag={tag}"))).unwrap();
+        let expected = json!([
+            {
+                "tag": tag,
+                "id": id1,
+                "stream_regex": ".*",
+                "destination_url": "https://example.com/webhook",
+                //"max_connections": 5,
+            },
+            {
+                "tag": tag,
+                "id": id2,
+                "stream_regex": ".*",
+                "destination_url": "https://example.com/webhook2",
+                //"max_connections": 5,
+            },
+        ]);
+        assert_eq!(response, expected);
+
+        let response = check_status!(
+            200,
+            client.get(format!("{url}/subscribers?tag=00000000-0000-0000-0000-000000000000"))
+        );
+        assert_eq!(response.unwrap(), json!([]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_delete_subscribers() {
+        let mut harness = TestHarness::new();
+        let url = harness.producer_api().await;
+        let client = reqwest::Client::new();
+
+        let tag = uuid!("094ce043-4789-43d7-b9a8-dbee7b658276");
+        let id1 = uuid!("8187c0ef-7d63-4dd9-9dee-4b48730cd10a");
+        let id2 = uuid!("de9d7723-1a4d-48d4-8c6f-2a481fc8680b");
+        for id in [id1, id2].into_iter() {
+            let body = json!({
+                "tag": tag,
+                "id": id,
+                "stream_regex": ".*",
+                "destination_url": "https://example.com/webhook",
+                "max_connections": 5,
+                "hmac_key": "nosecret",
+            });
+            check_status!(
+                200,
+                client
+                    .put(format!("{url}/subscribers"))
+                    .body(body.to_string())
+                    .header("Content-Type", "application/json")
+            );
+        }
+
+        let response = check_status!(200, client.get(format!("{url}/subscribers"))).unwrap();
+        let expected_body = json!([
+            {
+                "tag": tag,
+                "id": id1,
+                "stream_regex": ".*",
+                "destination_url": "https://example.com/webhook",
+                //"max_connections": 5,
+            },
+            {
+                "tag": tag,
+                "id": id2,
+                "stream_regex": ".*",
+                "destination_url": "https://example.com/webhook",
+                //"max_connections": 5,
+            },
+        ]);
+        assert_eq!(response, expected_body);
+
+        // Delete
+        check_status!(200, client.delete(format!("{url}/subscribers?tag={tag}&id={id2}")));
+
+        let response = check_status!(200, client.get(format!("{url}/subscribers"))).unwrap();
+        let expected = json!([{
+            "tag": tag,
+            "id": id1,
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook",
+            //"max_connections": 5,
+        }]);
+        assert_eq!(response, expected);
+
+        // (delete twice for good measure)
+        check_status!(200, client.delete(format!("{url}/subscribers?tag={tag}&id={id2}")));
+
+        let response = check_status!(200, client.get(format!("{url}/subscribers"))).unwrap();
+        let expected = json!([{
+            "tag": tag,
+            "id": id1,
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook",
+            //"max_connections": 5,
+        }]);
+        assert_eq!(response, expected);
+
+        // Can't delete without both tag and ID
+        check_status!(400, client.delete(format!("{url}/subscribers")));
+        check_status!(400, client.delete(format!("{url}/subscribers?id={id1}")));
+        check_status!(400, client.delete(format!("{url}/subscribers?tag={tag}")));
+        check_status!(200, client.delete(format!("{url}/subscribers?id={id1}&tag={tag}")));
     }
 }

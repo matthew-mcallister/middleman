@@ -121,9 +121,7 @@ impl TestHarness {
         let options = sqlx::sqlite::SqliteConnectOptions::from_str(self.sqlite_db_url())
             .unwrap()
             .create_if_missing(true);
-        let mut connection = sqlx::SqliteConnection::connect_with(&options)
-            .await
-            .unwrap();
+        let mut connection = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
 
         #[rustfmt::skip]
         sqlx::query(r"
@@ -164,9 +162,7 @@ impl TestHarness {
         let app = self.application();
         let router = producer_router(Arc::clone(app));
 
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         info!("Listening on {}", addr);
 
@@ -184,9 +180,7 @@ impl TestHarness {
         let app = self.application();
         let router = consumer_router(Arc::clone(app)).unwrap();
 
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         info!("Listening on {}", addr);
 
@@ -289,3 +283,26 @@ where
     };
     Ok((port, responder))
 }
+
+#[macro_export]
+macro_rules! check_status {
+    ($status:expr, $request:expr$(,)?) => {
+        async {
+            loop {
+                let response = $request.send().await.unwrap();
+                assert_eq!(response.status().as_u16(), $status);
+                if let Some(h) = response.headers().get("Content-Type") {
+                    if h.as_bytes() == b"application/json" {
+                        let body: serde_json::Value =
+                            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+                        break Some(body);
+                    }
+                }
+                break None;
+            }
+        }
+        .await
+    };
+}
+
+pub(crate) use check_status;

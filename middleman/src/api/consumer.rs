@@ -40,6 +40,16 @@ struct PutSubscriber {
     hmac_key: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ListSubscribers {
+    id: Option<Uuid>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DeleteSubscriber {
+    id: Uuid,
+}
+
 impl TryFrom<PutSubscriber> for SubscriberBuilder {
     type Error = Box<Error>;
 
@@ -105,36 +115,26 @@ pub fn router(app: Arc<Application>) -> Result<Router> {
                 },
             )
             .get(
-                async move |ConsumerAuth(tag), State(api): State<Arc<ConsumerApi>>| -> Result<_> {
+                async move |ConsumerAuth(tag),
+                            State(api): State<Arc<ConsumerApi>>,
+                            query: Query<ListSubscribers>|
+                            -> Result<_> {
                     let app = &api.app;
-                    let subscribers: Result<Vec<_>> = app.subscribers.iter_by_tag(tag).collect();
+                    let subscribers: Result<Vec<_>> = if let Some(id) = query.id {
+                        Ok(app.subscribers.get(tag, id)?.into_iter().collect())
+                    } else {
+                        app.subscribers.iter_by_tag(tag).collect()
+                    };
                     let subscribers: Vec<Box<ConsumerApiSerializer<_>>> = cast_from(subscribers?);
                     Ok(Json(subscribers))
-                },
-            ),
-        )
-        .route(
-            "/subscribers/{*id}",
-            get(
-                async move |ConsumerAuth(tag),
-                            Path(id): Path<String>,
-
-                            State(api): State<Arc<ConsumerApi>>|
-                            -> Result<_> {
-                    let id = Uuid::from_str(&id).map_err(|_| ErrorKind::NotFound)?;
-                    let subscriber =
-                        api.app.subscribers.get(tag, id)?.ok_or(ErrorKind::NotFound)?;
-                    let subscriber: Box<ConsumerApiSerializer<_>> = cast_from(subscriber);
-                    Ok(Json(subscriber))
                 },
             )
             .delete(
                 async move |ConsumerAuth(tag),
-                            Path(id): Path<String>,
-                            State(api): State<Arc<ConsumerApi>>|
+                            State(api): State<Arc<ConsumerApi>>,
+                            Query(query): Query<DeleteSubscriber>|
                             -> Result<_> {
-                    let id = Uuid::from_str(&id).map_err(|_| ErrorKind::NotFound)?;
-                    api.app.delete_subscriber(tag, id)?;
+                    api.app.delete_subscriber(tag, query.id)?;
                     Ok(StatusCode::from_u16(200).unwrap())
                 },
             ),
@@ -149,7 +149,7 @@ mod tests {
     use serde_json::json;
     use uuid::uuid;
 
-    use crate::testing::TestHarness;
+    use crate::testing::{check_status, TestHarness};
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_jwt_auth() {
@@ -161,37 +161,14 @@ mod tests {
         let token = harness.consumer_auth_token(tag.to_string());
         let client = reqwest::Client::new();
 
-        let response = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
-
-        let response = client.get(&url).send().await.unwrap();
-        assert_eq!(response.status().as_u16(), 401);
-
-        let response = client.get(&url).header("Authorization", "blah").send().await.unwrap();
-        assert_eq!(response.status().as_u16(), 401);
-
-        let response = client
-            .get(&url)
-            .header("Authorization", "Bearer wrongkey")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 401);
+        check_status!(200, client.get(&url).header("Authorization", format!("Bearer {token}")));
+        check_status!(401, client.get(&url));
+        check_status!(401, client.get(&url).header("Authorization", "blah"));
+        check_status!(401, client.get(&url).header("Authorization", "Bearer wrongkey"));
 
         // Make sure that we don't choke on invalid UUID
         let bad_token = harness.consumer_auth_token("invalidsub".to_owned());
-        let response = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {bad_token}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 401);
+        check_status!(401, client.get(&url).header("Authorization", format!("Bearer {bad_token}")));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -206,34 +183,30 @@ mod tests {
             "stream": "stream:0",
             "payload": {"hello": "world"},
         });
-        let response = client
-            .post(format!("{producer_url}/events"))
-            .body(body.to_string())
-            .header("Content-Type", "application/json")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
+        check_status!(
+            200,
+            client
+                .post(format!("{producer_url}/events"))
+                .body(body.to_string())
+                .header("Content-Type", "application/json")
+        );
 
         let tag = uuid!("efd9fd38-73e2-4bb3-a5ab-f948738568af");
         let token = harness.consumer_auth_token(tag.to_string());
         let consumer_url = harness.consumer_api().await;
 
-        let response = client
-            .get(format!("{consumer_url}/events"))
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
-        let body: serde_json::Value =
-            serde_json::from_str(&response.text().await.unwrap()).unwrap();
-        let expected_body = json!([{
+        let response = check_status!(
+            200,
+            client
+                .get(format!("{consumer_url}/events"))
+                .header("Authorization", format!("Bearer {token}"))
+        );
+        let expected = json!([{
             "id": 1,
             "stream": "stream:0",
             "payload": {"hello": "world"},
         }]);
-        assert_eq!(body, expected_body);
+        assert_eq!(response.unwrap(), expected);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -254,68 +227,59 @@ mod tests {
             "max_connections": 6,
             "hmac_key": "fakesecret",
         });
-        let response = client
-            .put(format!("{consumer_url}/subscribers"))
-            .body(body.to_string())
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
+        check_status!(
+            200,
+            client
+                .put(format!("{consumer_url}/subscribers"))
+                .body(body.to_string())
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {token}"))
+        );
 
         // List
-        let response = client
-            .get(format!("{consumer_url}/subscribers"))
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
-        let body: serde_json::Value =
-            serde_json::from_str(&response.text().await.unwrap()).unwrap();
-        let expected_body = json!([{
+        let response = check_status!(
+            200,
+            client
+                .get(format!("{consumer_url}/subscribers"))
+                .header("Authorization", format!("Bearer {token}"))
+        );
+        let expected = json!([{
             "id": subscriber_id,
             "stream_regex": ".*",
             "destination_url": "https://example.com/webhook",
             // TODO
             //"max_connections": 6,
         }]);
-        assert_eq!(body, expected_body);
+        assert_eq!(response.unwrap(), expected);
 
         // Get by ID
-        let response = client
-            .get(format!("{consumer_url}/subscribers/{subscriber_id}"))
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
-        let body: serde_json::Value =
-            serde_json::from_str(&response.text().await.unwrap()).unwrap();
-        let expected_body = json!({
+        let response = check_status!(
+            200,
+            client
+                .get(format!("{consumer_url}/subscribers?id={subscriber_id}"))
+                .header("Authorization", format!("Bearer {token}"))
+        );
+        let expected = json!([{
             "id": "481b7576-bced-4d6b-a22a-9ee67f0c63f6",
             "stream_regex": ".*",
             "destination_url": "https://example.com/webhook",
             //"max_connections": 6,
-        });
-        assert_eq!(body, expected_body);
+        }]);
+        assert_eq!(response.unwrap(), expected);
 
         // Delete
-        let response = client
-            .delete(format!("{consumer_url}/subscribers/{subscriber_id}"))
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 200);
+        check_status!(
+            200,
+            client
+                .delete(format!("{consumer_url}/subscribers?id={subscriber_id}"))
+                .header("Authorization", format!("Bearer {token}"))
+        );
 
-        let response = client
-            .get(format!("{consumer_url}/subscribers/{subscriber_id}"))
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 404);
+        check_status!(
+            404,
+            client
+                .get(format!("{consumer_url}/subscribers/{subscriber_id}"))
+                .header("Authorization", format!("Bearer {token}"))
+        );
     }
 }
