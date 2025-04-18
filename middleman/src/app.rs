@@ -3,6 +3,7 @@ use std::sync::Arc;
 use db::{Db, Transaction};
 use middleman_db as db;
 use tracing::debug;
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::connection::Http11ConnectionPoolSettings;
@@ -67,22 +68,17 @@ impl Application {
         opts.set_snapshot(true);
         let mut txn = Transaction::new(Arc::clone(&self.db));
         let event = self.events.create(&mut txn, builder)?;
-        self.create_deliveries_for_event(&mut txn, event.id(), &event)?;
+        self.create_deliveries_for_event(&mut txn, &event)?;
         txn.commit()?;
         debug!(?event, "Created event {}", event.id());
         // TODO: Schedule event to be delivered if queue is not too full
         Ok(event)
     }
 
-    fn create_deliveries_for_event(
-        &self,
-        txn: &mut Transaction,
-        event_id: u64,
-        event: &Event,
-    ) -> Result<()> {
+    fn create_deliveries_for_event(&self, txn: &mut Transaction, event: &Event) -> Result<()> {
         let subscribers = self.subscribers.iter_by_stream(event.tag(), event.stream());
         for subscriber in subscribers {
-            self.deliveries.create(txn, subscriber?.id(), event_id);
+            self.deliveries.create(txn, event.tag(), subscriber?.id(), event.id());
         }
         Ok(())
     }
@@ -93,6 +89,13 @@ impl Application {
         txn.commit()?;
         self.scheduler.register_subscriber(&subscriber);
         Ok(subscriber)
+    }
+
+    pub fn delete_subscriber(&self, tag: Uuid, id: Uuid) -> Result<()> {
+        let mut txn = self.db.begin_transaction();
+        self.subscribers.delete(&mut txn, tag, id)?;
+        txn.commit()?;
+        Ok(())
     }
 
     pub fn schedule_deliveries(&self) -> Result<()> {
@@ -122,10 +125,14 @@ mod tests {
         let tag = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000001");
         let mut builder = EventBuilder::new();
-        builder.tag(tag).stream("asdf").payload("1234321").idempotency_key(idempotency_key);
+        builder
+            .tag(tag)
+            .stream("asdf")
+            .payload("1234321")
+            .idempotency_key(idempotency_key);
         let event = app.create_event(builder.clone()).unwrap();
 
-        let event2 = app.events.get(tag, event.id()).unwrap().unwrap();
+        let event2 = app.events.get(event.tag(), event.id()).unwrap().unwrap();
         assert_eq!(event, event2);
 
         let event2 = app.create_event(builder).unwrap();
@@ -161,13 +168,25 @@ mod tests {
         // Create an event that matches both subscribers
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let mut event = EventBuilder::new();
-        event.tag(tag).stream("asdf:1234").payload("1234321").idempotency_key(idempotency_key);
+        event
+            .tag(tag)
+            .stream("asdf:1234")
+            .payload("1234321")
+            .idempotency_key(idempotency_key);
         let event = app.create_event(event).unwrap();
 
-        let delivery1 = app.deliveries.get(subscriber1.id(), event.id()).unwrap().unwrap();
+        let delivery1 = app
+            .deliveries
+            .get(subscriber1.tag(), subscriber1.id(), event.id())
+            .unwrap()
+            .unwrap();
         assert_eq!(delivery1.attempts_made(), 0);
 
-        let delivery2 = app.deliveries.get(subscriber2.id(), event.id()).unwrap().unwrap();
+        let delivery2 = app
+            .deliveries
+            .get(subscriber2.tag(), subscriber2.id(), event.id())
+            .unwrap()
+            .unwrap();
         assert_eq!(delivery2.attempts_made(), 0);
     }
 
@@ -180,7 +199,8 @@ mod tests {
         let mut options = DbOptions::default();
         options.create_if_missing = true;
         let mut db = middleman_db::Db::open(harness.db_dir(), &options, descs).unwrap();
-        db.create_column_family(&("cf", &Default::default(), Default::default())).unwrap();
+        db.create_column_family(&("cf", &Default::default(), Default::default()))
+            .unwrap();
         let db = Arc::new(db);
         let cf = db.get_column_family("cf").unwrap();
 
@@ -188,9 +208,6 @@ mod tests {
         let mut txn1 = Transaction::new(Arc::clone(&db));
         txn1.lock_key(&cf, key.clone()).unwrap();
         let mut txn2 = Transaction::new(Arc::clone(&db));
-        assert_eq!(
-            txn2.lock_key(&cf, key).unwrap_err().kind(),
-            db::ErrorKind::TransactionConflict
-        );
+        assert_eq!(txn2.lock_key(&cf, key).unwrap_err().kind(), db::ErrorKind::TransactionConflict);
     }
 }

@@ -20,6 +20,7 @@ pub trait Key: Clone + Eq + Hash + Debug + Send + Sync + 'static {}
 pub trait Connection: Debug + Send + Sync + 'static {}
 
 impl Key for Uuid {}
+impl<T1: Key, T2: Key> Key for (T1, T2) {}
 
 pub trait ConnectionFactory: Debug + Send + Sync + 'static {
     type Key: Key;
@@ -220,7 +221,7 @@ impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
         }
     }
 
-    pub async fn connect<'a>(&'a self, key: &'a K) -> Result<ConnectionHandle<'a, K, C>> {
+    pub async fn connect<'a>(&'a self, key: &K) -> Result<ConnectionHandle<'a, K, C>> {
         let connection = self.acquire_lease(key).await?;
 
         let keepalive = self.settings.idle_timeout_seconds;

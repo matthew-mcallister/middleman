@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytecast::{FromBytes, HasLayout, IntoBytes, Unalign};
 use chrono::{Datelike, Timelike, Utc};
-use middleman_db::key::{BigEndianU32, BigEndianU64, Packed2};
+use middleman_db::key::{BigEndianU32, BigEndianU64, Packed2, Packed3};
 use middleman_db::prefix::IsPrefixOf;
 use middleman_db::{
     packed, Accessor, ColumnFamily, ColumnFamilyDescriptor, Cursor, Db, Transaction,
@@ -61,7 +61,11 @@ impl From<chrono::DateTime<Utc>> for DateTime {
         let yof = u32::try_from(year).unwrap() << 9 | day;
         let seconds = value.num_seconds_from_midnight();
         let nanos = value.nanosecond();
-        DateTime { yof, seconds, nanos }
+        DateTime {
+            yof,
+            seconds,
+            nanos,
+        }
     }
 }
 
@@ -69,6 +73,7 @@ impl From<chrono::DateTime<Utc>> for DateTime {
 #[derive(Clone, Copy, Debug, FromBytes, HasLayout, IntoBytes, PartialEq, Eq)]
 #[repr(C)]
 pub struct Delivery {
+    tag: [u8; 16],
     subscriber_id: [u8; 16],
     event_id: u64,
     _reserved: [u64; 2],
@@ -77,6 +82,10 @@ pub struct Delivery {
 }
 
 impl Delivery {
+    pub(crate) fn tag(&self) -> Uuid {
+        Uuid::from_bytes(self.tag)
+    }
+
     pub(crate) fn subscriber_id(&self) -> Uuid {
         Uuid::from_bytes(self.subscriber_id)
     }
@@ -91,6 +100,7 @@ impl Delivery {
 
     fn next_attempt_index_key(&self) -> NextAttemptKey {
         NextAttemptKey {
+            tag: self.tag,
             subscriber_id: self.subscriber_id,
             yof: self.next_attempt.yof.into(),
             seconds: self.next_attempt.seconds.into(),
@@ -110,7 +120,7 @@ pub struct DeliveryTable {
     next_attempt_index: ColumnFamily,
 }
 
-type DeliveryKey = Packed2<BigEndianU64, [u8; 16]>;
+type DeliveryKey = Packed3<BigEndianU64, [u8; 16], [u8; 16]>;
 
 // TODO: Add a global next attempt index with the subscriber as suffix rather
 // than prefix. Then support both "fast scan" over all subscribers and "fair
@@ -118,6 +128,7 @@ type DeliveryKey = Packed2<BigEndianU64, [u8; 16]>;
 #[derive(Clone, Copy, Debug, Eq, FromBytes, HasLayout, IntoBytes, Ord, PartialEq, PartialOrd)]
 #[repr(C)]
 pub(crate) struct NextAttemptKey {
+    tag: [u8; 16],
     subscriber_id: [u8; 16],
     yof: BigEndianU32,
     seconds: BigEndianU32,
@@ -131,7 +142,11 @@ impl NextAttemptKey {
     }
 
     fn timestamp(&self) -> DateTime {
-        DateTime { yof: self.yof.into(), seconds: self.seconds.into(), nanos: self.nanos.into() }
+        DateTime {
+            yof: self.yof.into(),
+            seconds: self.seconds.into(),
+            nanos: self.nanos.into(),
+        }
     }
 }
 
@@ -141,12 +156,23 @@ impl IsPrefixOf<NextAttemptKey> for [u8; 16] {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct PendingDelivery {
+    pub(crate) transaction: Transaction,
+    pub(crate) tag: Uuid,
+    pub(crate) subscriber_id: Uuid,
+    pub(crate) event_id: u64,
+}
+
 impl DeliveryTable {
     pub(crate) fn new(db: Arc<Db>) -> Result<Self> {
         let cf = db.get_column_family(ColumnFamilyName::Deliveries.name()).unwrap();
         let next_attempt_index =
             db.get_column_family(ColumnFamilyName::DeliveryNextAttemptIndex.name()).unwrap();
-        Ok(Self { cf, next_attempt_index })
+        Ok(Self {
+            cf,
+            next_attempt_index,
+        })
     }
 
     fn accessor<'a>(&'a self) -> Accessor<'a, DeliveryKey, Unalign<Delivery>> {
@@ -164,11 +190,14 @@ impl DeliveryTable {
     pub(crate) fn create(
         &self,
         txn: &mut Transaction,
+        // n.b. this tag is technically redundant
+        tag: Uuid,
         subscriber_id: Uuid,
         event_id: u64,
     ) -> Delivery {
         let next_attempt = Utc::now().into();
         let delivery = Delivery {
+            tag: tag.into_bytes(),
             subscriber_id: subscriber_id.into_bytes(),
             event_id,
             attempts_made: 0,
@@ -177,7 +206,7 @@ impl DeliveryTable {
         };
         self.accessor().put_txn(
             txn,
-            &packed!(event_id.into(), subscriber_id.into_bytes()),
+            &packed!(event_id.into(), tag.into_bytes(), subscriber_id.into_bytes()),
             &Unalign(delivery),
         );
         let index_key = delivery.next_attempt_index_key();
@@ -185,10 +214,15 @@ impl DeliveryTable {
         delivery
     }
 
-    pub(crate) fn get(&self, subscriber_id: Uuid, event_id: u64) -> Result<Option<Delivery>> {
+    pub(crate) fn get(
+        &self,
+        tag: Uuid,
+        subscriber_id: Uuid,
+        event_id: u64,
+    ) -> Result<Option<Delivery>> {
         Ok(self
             .accessor()
-            .get(&(event_id.into(), subscriber_id.into_bytes()).into())?
+            .get(&packed!(event_id.into(), tag.into_bytes(), subscriber_id.into_bytes()))?
             .map(|x| x.into_inner()))
     }
 
@@ -200,14 +234,18 @@ impl DeliveryTable {
 
     pub(crate) fn iter_by_next_attempt_skip_locked<'a>(
         &'a self,
+        tag: Uuid,
         subscriber_id: Uuid,
         max_time: chrono::DateTime<chrono::Utc>,
-    ) -> impl Iterator<Item = Result<(Transaction, Uuid, u64)>> + 'a {
+    ) -> impl Iterator<Item = Result<PendingDelivery>> + 'a {
         let max_time: DateTime = max_time.into();
         let mut done = false;
         self.next_attempt_index_accessor()
             .cursor()
-            .prefix_iter::<[u8; 16]>(subscriber_id.into_bytes())
+            .prefix_iter::<Packed2<[u8; 16], [u8; 16]>>(packed!(
+                tag.into_bytes(),
+                subscriber_id.into_bytes()
+            ))
             .keys()
             .filter_map(move |key| {
                 if done {
@@ -224,22 +262,30 @@ impl DeliveryTable {
                     return None;
                 }
 
-                let NextAttemptKey { subscriber_id, event_id, .. } = key;
-                let key: DeliveryKey = packed!(event_id, subscriber_id);
+                let NextAttemptKey {
+                    tag,
+                    subscriber_id,
+                    event_id,
+                    ..
+                } = key;
+                let key: DeliveryKey = packed!(event_id, tag, subscriber_id);
                 let transaction =
                     self.db().begin_transaction_locked(&self.cf, IntoBytes::as_bytes(&key));
 
                 match transaction {
-                    Ok(transaction) => {
-                        Some(Ok((transaction, Uuid::from_bytes(subscriber_id), event_id.into())))
-                    },
+                    Ok(transaction) => Some(Ok(PendingDelivery {
+                        transaction,
+                        tag: Uuid::from_bytes(tag),
+                        subscriber_id: Uuid::from_bytes(subscriber_id),
+                        event_id: event_id.into(),
+                    })),
                     Err(_) => None,
                 }
             })
     }
 
     pub(crate) fn delete(&self, txn: &mut Transaction, delivery: &Delivery) {
-        let key = packed!(delivery.event_id.into(), delivery.subscriber_id);
+        let key = packed!(delivery.event_id.into(), delivery.tag, delivery.subscriber_id);
         self.accessor().delete_txn(txn, &key);
         let key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().delete_txn(txn, &key);
@@ -272,7 +318,7 @@ impl DeliveryTable {
         delivery.next_attempt = Utc::now().checked_add_signed(delay).unwrap().into();
 
         // Insert new data
-        let key = packed!(delivery.event_id.into(), delivery.subscriber_id);
+        let key = packed!(delivery.event_id.into(), delivery.tag, delivery.subscriber_id);
         self.accessor().put_txn(txn, &key, Unalign::from_ref(delivery));
         let key = delivery.next_attempt_index_key();
         self.next_attempt_index_accessor().put_txn(txn, &key, &());
@@ -293,13 +339,14 @@ mod tests {
         let app = harness.application();
         let deliveries = &app.deliveries;
 
+        let tag = uuid::uuid!("10000000-0000-8000-8000-000000000000");
         let subscriber_id = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let event_id: u64 = 1;
         let mut txn = Transaction::new(Arc::clone(&app.db));
-        let delivery = deliveries.create(&mut txn, subscriber_id, event_id);
+        let delivery = deliveries.create(&mut txn, tag, subscriber_id, event_id);
         txn.commit().unwrap();
 
-        let delivery2 = deliveries.get(subscriber_id, event_id).unwrap().unwrap();
+        let delivery2 = deliveries.get(tag, subscriber_id, event_id).unwrap().unwrap();
         assert_eq!(delivery, delivery2);
     }
 }

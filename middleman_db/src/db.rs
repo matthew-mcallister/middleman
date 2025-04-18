@@ -51,7 +51,8 @@ impl Db {
     }
 
     pub fn create_column_family(&mut self, descriptor: &impl ColumnFamilyDescriptor) -> Result<()> {
-        self.raw.create_cf(descriptor.name(), &descriptor.options())?;
+        self.raw
+            .create_cf(descriptor.name(), &descriptor.options())?;
         Ok(())
     }
 
@@ -76,7 +77,7 @@ impl Db {
         Transaction::new_locked(Arc::clone(self), cf, key)
     }
 
-    /// Prints all the key/value pairs in a table as a debugging aid..
+    /// Prints all the key/value pairs in a table as a debugging aid.
     pub fn dump(&self, cf: &ColumnFamily) {
         struct ByteString<'a>(&'a [u8]);
 

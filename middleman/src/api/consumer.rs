@@ -1,16 +1,18 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::api::to_json::{JsonFormatter, ProducerApiSerializer};
-use axum::extract::{Query, State};
-use axum::routing::{get, put, Router};
+use crate::api::to_json::{ConsumerApiSerializer, JsonFormatter};
+use axum::extract::{Path, Query, State};
+use axum::routing::{delete, get, put, Router};
 use axum::Json;
 use cast::cast_from;
+use http::StatusCode;
 use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::subscriber::SubscriberBuilder;
 use crate::Application;
 
@@ -80,12 +82,9 @@ pub fn router(app: Arc<Application>) -> Result<Router> {
                             .take(max_results as _)
                             .collect()
                     } else {
-                        app.events
-                            .iter_by_tag(tag, starting_id)
-                            .take(max_results as _)
-                            .collect()
+                        app.events.iter_by_tag(tag, starting_id).take(max_results as _).collect()
                     };
-                    let events: Vec<Box<ProducerApiSerializer<_>>> = cast_from(events?);
+                    let events: Vec<Box<ConsumerApiSerializer<_>>> = cast_from(events?);
                     Ok(JsonFormatter(events))
                 },
             ),
@@ -101,7 +100,7 @@ pub fn router(app: Arc<Application>) -> Result<Router> {
                     let mut builder: SubscriberBuilder = request.try_into()?;
                     builder.tag(tag);
                     let subscriber = app.create_subscriber(builder)?;
-                    let subscriber: Box<ProducerApiSerializer<_>> = cast_from(subscriber);
+                    let subscriber: Box<ConsumerApiSerializer<_>> = cast_from(subscriber);
                     Ok(Json(subscriber))
                 },
             )
@@ -109,11 +108,36 @@ pub fn router(app: Arc<Application>) -> Result<Router> {
                 async move |ConsumerAuth(tag), State(api): State<Arc<ConsumerApi>>| -> Result<_> {
                     let app = &api.app;
                     let subscribers: Result<Vec<_>> = app.subscribers.iter_by_tag(tag).collect();
-                    let subscribers: Vec<Box<ProducerApiSerializer<_>>> = cast_from(subscribers?);
+                    let subscribers: Vec<Box<ConsumerApiSerializer<_>>> = cast_from(subscribers?);
                     Ok(Json(subscribers))
                 },
             ),
-            // XXX: delete
+        )
+        .route(
+            "/subscribers/{*id}",
+            get(
+                async move |ConsumerAuth(tag),
+                            Path(id): Path<String>,
+
+                            State(api): State<Arc<ConsumerApi>>|
+                            -> Result<_> {
+                    let id = Uuid::from_str(&id).map_err(|_| ErrorKind::NotFound)?;
+                    let subscriber =
+                        api.app.subscribers.get(tag, id)?.ok_or(ErrorKind::NotFound)?;
+                    let subscriber: Box<ConsumerApiSerializer<_>> = cast_from(subscriber);
+                    Ok(Json(subscriber))
+                },
+            )
+            .delete(
+                async move |ConsumerAuth(tag),
+                            Path(id): Path<String>,
+                            State(api): State<Arc<ConsumerApi>>|
+                            -> Result<_> {
+                    let id = Uuid::from_str(&id).map_err(|_| ErrorKind::NotFound)?;
+                    api.app.delete_subscriber(tag, id)?;
+                    Ok(StatusCode::from_u16(200).unwrap())
+                },
+            ),
         )
         .with_state(Arc::new(api));
 
@@ -122,6 +146,7 @@ pub fn router(app: Arc<Application>) -> Result<Router> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use uuid::uuid;
 
     use crate::testing::TestHarness;
@@ -147,12 +172,7 @@ mod tests {
         let response = client.get(&url).send().await.unwrap();
         assert_eq!(response.status().as_u16(), 401);
 
-        let response = client
-            .get(&url)
-            .header("Authorization", "blah")
-            .send()
-            .await
-            .unwrap();
+        let response = client.get(&url).header("Authorization", "blah").send().await.unwrap();
         assert_eq!(response.status().as_u16(), 401);
 
         let response = client
@@ -175,5 +195,127 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_events() {}
+    async fn test_events() {
+        let mut harness = TestHarness::new();
+
+        let producer_url = harness.producer_api().await;
+        let client = reqwest::Client::new();
+        let body = json!({
+            "tag": "efd9fd38-73e2-4bb3-a5ab-f948738568af",
+            "idempotency_key": "3ed5a219-e0e0-46af-bd8d-86d7380dc9da",
+            "stream": "stream:0",
+            "payload": {"hello": "world"},
+        });
+        let response = client
+            .post(format!("{producer_url}/events"))
+            .body(body.to_string())
+            .header("Content-Type", "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+
+        let tag = uuid!("efd9fd38-73e2-4bb3-a5ab-f948738568af");
+        let token = harness.consumer_auth_token(tag.to_string());
+        let consumer_url = harness.consumer_api().await;
+
+        let response = client
+            .get(format!("{consumer_url}/events"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        let expected_body = json!([{
+            "id": 1,
+            "stream": "stream:0",
+            "payload": {"hello": "world"},
+        }]);
+        assert_eq!(body, expected_body);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_subscribers() {
+        let mut harness = TestHarness::new();
+
+        let tag = uuid!("efd9fd38-73e2-4bb3-a5ab-f948738568af");
+        let token = harness.consumer_auth_token(tag.to_string());
+        let consumer_url = harness.consumer_api().await;
+        let client = reqwest::Client::new();
+
+        // Create
+        let subscriber_id = "481b7576-bced-4d6b-a22a-9ee67f0c63f6";
+        let body = json!({
+            "id": subscriber_id,
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook",
+            "max_connections": 6,
+            "hmac_key": "fakesecret",
+        });
+        let response = client
+            .put(format!("{consumer_url}/subscribers"))
+            .body(body.to_string())
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+
+        // List
+        let response = client
+            .get(format!("{consumer_url}/subscribers"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        let expected_body = json!([{
+            "id": subscriber_id,
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook",
+            // TODO
+            //"max_connections": 6,
+        }]);
+        assert_eq!(body, expected_body);
+
+        // Get by ID
+        let response = client
+            .get(format!("{consumer_url}/subscribers/{subscriber_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        let expected_body = json!({
+            "id": "481b7576-bced-4d6b-a22a-9ee67f0c63f6",
+            "stream_regex": ".*",
+            "destination_url": "https://example.com/webhook",
+            //"max_connections": 6,
+        });
+        assert_eq!(body, expected_body);
+
+        // Delete
+        let response = client
+            .delete(format!("{consumer_url}/subscribers/{subscriber_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+
+        let response = client
+            .get(format!("{consumer_url}/subscribers/{subscriber_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 404);
+    }
 }

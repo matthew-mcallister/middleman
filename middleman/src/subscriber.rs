@@ -63,11 +63,9 @@ impl Serialize for ConsumerApiSerializer<Subscriber> {
 #[derive(Debug)]
 pub(crate) struct SubscriberTable {
     cf: ColumnFamily,
-    tag_index_cf: ColumnFamily,
 }
 
-pub(crate) type SubscriberKey = [u8; 16];
-pub(crate) type TagIndexKey = Packed2<[u8; 16], [u8; 16]>;
+pub(crate) type SubscriberKey = Packed2<[u8; 16], [u8; 16]>;
 
 impl Subscriber {
     pub fn tag(&self) -> Uuid {
@@ -94,9 +92,7 @@ impl Subscriber {
 impl SubscriberTable {
     pub(crate) fn new(db: Arc<Db>) -> Result<Self> {
         let cf = db.get_column_family(ColumnFamilyName::Subscribers.name()).unwrap();
-        let tag_index_cf =
-            db.get_column_family(ColumnFamilyName::SubscriberTagIndex.name()).unwrap();
-        Ok(Self { cf, tag_index_cf })
+        Ok(Self { cf })
     }
 
     pub(crate) fn db(&self) -> &Arc<Db> {
@@ -107,24 +103,26 @@ impl SubscriberTable {
         Accessor::new(&self.cf)
     }
 
-    fn tag_index_accessor<'a>(&'a self) -> Accessor<'a, TagIndexKey, ()> {
-        Accessor::new(&self.tag_index_cf)
-    }
-
     pub fn create(
         &self,
         txn: &mut Transaction,
         mut builder: SubscriberBuilder,
     ) -> Result<Box<Subscriber>> {
         let subscriber = builder.build()?;
-        self.accessor().put_txn(txn, subscriber.id().as_bytes(), &subscriber);
         let key = packed!(subscriber.tag().into_bytes(), subscriber.id().into_bytes());
-        self.tag_index_accessor().put_txn(txn, &key, &());
+        self.accessor().put_txn(txn, &key, &subscriber);
         Ok(subscriber)
     }
 
-    pub fn get(&self, id: Uuid) -> Result<Option<Box<Subscriber>>> {
-        Ok(self.accessor().get(id.as_bytes())?)
+    pub fn get(&self, tag: Uuid, id: Uuid) -> Result<Option<Box<Subscriber>>> {
+        let key = packed!(tag.into_bytes(), id.into_bytes());
+        Ok(self.accessor().get(&key)?)
+    }
+
+    pub fn delete(&self, txn: &mut Transaction, tag: Uuid, id: Uuid) -> Result<()> {
+        let key = packed!(tag.into_bytes(), id.into_bytes());
+        self.accessor().delete_txn(txn, &key);
+        Ok(())
     }
 
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = Result<Box<Subscriber>>> + 'a {
@@ -138,12 +136,11 @@ impl SubscriberTable {
         &'a self,
         tag: Uuid,
     ) -> impl Iterator<Item = Result<Box<Subscriber>>> + 'a {
-        self.tag_index_accessor().cursor().prefix_iter::<[u8; 16]>(*tag.as_bytes()).keys().map(
-            |key| {
-                let Packed2(_, id) = key?;
-                Ok(self.get(Uuid::from_bytes(id)).transpose().unwrap()?)
-            },
-        )
+        self.accessor()
+            .cursor()
+            .prefix_iter::<[u8; 16]>(*tag.as_bytes())
+            .values()
+            .map(|x| Ok(x?))
     }
 
     /// Iterates over all subscribers of the given stream. This may be slow if
@@ -220,7 +217,7 @@ impl SubscriberBuilder {
         let hmac_key = self.hmac_key.take().ok_or("missing subscriber HMAC key")?;
         let header = SubscriberHeader {
             tag: self.tag.ok_or("missing tag")?.into_bytes(),
-            id: self.id.ok_or("missing ID")?.into_bytes(),
+            id: self.id.expect("missing internal ID").into_bytes(),
             _reserved: [0; 2],
         };
         Ok(Subscriber::new(
@@ -271,6 +268,6 @@ mod tests {
         assert_eq!(subscriber.stream_regex(), regex);
         assert_eq!(subscriber.destination_url(), url);
 
-        assert_eq!(subscribers.get(subscriber.id()).unwrap().unwrap(), subscriber,);
+        assert_eq!(subscribers.get(tag, subscriber.id()).unwrap().unwrap(), subscriber,);
     }
 }

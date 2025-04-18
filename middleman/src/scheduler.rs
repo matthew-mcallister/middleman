@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use middleman_db::{Db, Transaction};
+use middleman_db::Db;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::delivery::DeliveryTable;
+use crate::delivery::{DeliveryTable, PendingDelivery};
 use crate::delivery_task::DeliveryTask;
 use crate::error::Result;
 use crate::event::EventTable;
@@ -25,7 +25,10 @@ where
     [T; N]: Default,
 {
     fn default() -> Self {
-        Self { head: 0, elems: Default::default() }
+        Self {
+            head: 0,
+            elems: Default::default(),
+        }
     }
 }
 
@@ -53,6 +56,7 @@ impl<T, const N: usize> RingBuffer<T, N> {
 #[derive(Debug)]
 pub(crate) struct TaskShared {
     pub(crate) db: Arc<Db>,
+    pub(crate) tag: Uuid,
     pub(crate) subscriber_id: Uuid,
     pub(crate) stats: Stats,
     pub(crate) subscribers: Arc<SubscriberTable>,
@@ -115,16 +119,18 @@ impl UnitScheduler {
         num
     }
 
-    fn spawn_task<'st>(
-        &self,
-        transaction: Transaction,
-        subscriber_id: Uuid,
-        event_id: u64,
-    ) -> Result<()> {
+    fn spawn_task<'st>(&self, pending_delivery: PendingDelivery) -> Result<()> {
+        let PendingDelivery {
+            transaction,
+            tag,
+            subscriber_id,
+            event_id,
+        } = pending_delivery;
+
         let shared = Arc::clone(&self.shared);
         shared.stats.queued_tasks.fetch_add(1, Ordering::Acquire);
 
-        let task = DeliveryTask::new(shared, transaction, subscriber_id, event_id)?;
+        let task = DeliveryTask::new(shared, transaction, tag, subscriber_id, event_id)?;
         tokio::spawn(task.run());
         Ok(())
     }
@@ -135,11 +141,11 @@ impl UnitScheduler {
         for result in self
             .shared
             .deliveries
-            .iter_by_next_attempt_skip_locked(self.shared.subscriber_id, max_time)
+            .iter_by_next_attempt_skip_locked(self.shared.tag, self.shared.subscriber_id, max_time)
             .take(num_tasks as usize)
         {
-            let (transaction, subscriber_id, event_id) = result?;
-            self.spawn_task(transaction, subscriber_id, event_id)?;
+            let pending_delivery = result?;
+            self.spawn_task(pending_delivery)?;
         }
         Ok(())
     }
@@ -186,6 +192,7 @@ impl Scheduler {
     pub fn register_subscriber(&self, subscriber: &Subscriber) {
         let shared = Arc::new(TaskShared {
             db: Arc::clone(self.subscribers.db()),
+            tag: subscriber.tag(),
             subscriber_id: subscriber.id(),
             stats: Default::default(),
             subscribers: Arc::clone(&self.subscribers),
@@ -195,7 +202,10 @@ impl Scheduler {
         });
         self.unit_schedulers.insert(
             subscriber.id(),
-            UnitScheduler { shared, tasks_started_history: Default::default() },
+            UnitScheduler {
+                shared,
+                tasks_started_history: Default::default(),
+            },
         );
         debug!(?subscriber, "registered subscriber {}", subscriber.id());
     }
@@ -260,7 +270,11 @@ mod tests {
         // Create an event
         let idempotency_key = uuid::uuid!("00000000-0000-8000-8000-000000000000");
         let mut event = EventBuilder::new();
-        event.tag(tag).stream("asdf:1234").payload("[1, 2, 3]").idempotency_key(idempotency_key);
+        event
+            .tag(tag)
+            .stream("asdf:1234")
+            .payload("[1, 2, 3]")
+            .idempotency_key(idempotency_key);
         app.create_event(event).unwrap();
         assert_eq!(app.deliveries.iter().map(Result::unwrap).count(), 1);
 

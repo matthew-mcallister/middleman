@@ -11,7 +11,6 @@ pub(crate) enum ColumnFamilyName {
     EventTagIdempotencyKeyIndex,
     EventTagStreamIndex,
     Subscribers,
-    SubscriberTagIndex,
 }
 
 impl db::column_family::ColumnFamilyDescriptor for ColumnFamilyName {

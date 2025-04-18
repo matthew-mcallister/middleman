@@ -30,10 +30,7 @@ impl Resolver {
     async fn resolve(&self, host: impl ToSocketAddrs) -> Result<SocketAddr> {
         let mut hosts = tokio::net::lookup_host(host).await?;
         let address = hosts.find(|a| a.is_ipv4());
-        Ok(address.ok_or(Error::with_cause(
-            ErrorKind::NetworkError,
-            "DNS lookup failed",
-        ))?)
+        Ok(address.ok_or(Error::with_cause(ErrorKind::NetworkError, "DNS lookup failed"))?)
     }
 }
 
@@ -115,8 +112,9 @@ impl RawConnectionFactory {
         };
         let stream = Pin::new(stream);
 
-        let (send_request, connection) =
-            hyper::client::conn::http1::Builder::new().handshake(TokioIo::new(stream)).await?;
+        let (send_request, connection) = hyper::client::conn::http1::Builder::new()
+            .handshake(TokioIo::new(stream))
+            .await?;
         tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -144,7 +142,7 @@ impl SubscriberConnectionFactory {
 }
 
 impl ConnectionFactory for SubscriberConnectionFactory {
-    type Key = Uuid;
+    type Key = (Uuid, Uuid);
     type Connection = HttpConnection;
 
     fn connect<'a>(
@@ -153,7 +151,7 @@ impl ConnectionFactory for SubscriberConnectionFactory {
         keep_alive_secs: u16,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send + 'a>> {
         Box::pin(async move {
-            let subscriber = self.subscribers.get(*key)?.ok_or(ErrorKind::InvalidInput)?;
+            let subscriber = self.subscribers.get(key.0, key.1)?.ok_or(ErrorKind::InvalidInput)?;
             let url = Url::from_str(subscriber.destination_url()).unwrap();
             let mut info = ConnectionInfo::from_url(&url).unwrap();
             info.keep_alive_secs = keep_alive_secs;
@@ -162,7 +160,7 @@ impl ConnectionFactory for SubscriberConnectionFactory {
     }
 }
 
-pub(crate) type SubscriberConnectionPool = Http11ConnectionPool<Uuid, HttpConnection>;
+pub(crate) type SubscriberConnectionPool = Http11ConnectionPool<(Uuid, Uuid), HttpConnection>;
 
 /// Fills in the "Timestamp" and "Signature" headers on the request.
 pub(crate) fn timestamp_and_sign_request(
@@ -171,14 +169,18 @@ pub(crate) fn timestamp_and_sign_request(
     request: &mut Request<String>,
 ) {
     let timestamp = format!("{}", timestamp.format("%+"));
-    request.headers_mut().insert("Timestamp", HeaderValue::from_str(&timestamp).unwrap());
+    request
+        .headers_mut()
+        .insert("Timestamp", HeaderValue::from_str(&timestamp).unwrap());
 
     let mut mac = Hmac::<Sha256>::new_from_slice(hmac_key.as_ref()).unwrap();
     mac.update(timestamp.as_bytes());
     mac.update(b"|");
     mac.update(request.body().as_bytes());
     let signature = hex::encode(&mac.finalize().into_bytes());
-    request.headers_mut().insert("Signature", HeaderValue::from_str(&signature).unwrap());
+    request
+        .headers_mut()
+        .insert("Signature", HeaderValue::from_str(&signature).unwrap());
 }
 
 #[cfg(test)]
@@ -258,9 +260,6 @@ mod tests {
         assert_eq!(ts_header, timestamp);
 
         let sig_header = request.headers().get("Signature").unwrap().to_str().unwrap();
-        assert_eq!(
-            sig_header,
-            "e280eb411338ec950ac9dc8574c3670cf44d2df79f3e2839e5059b4a7608f820",
-        );
+        assert_eq!(sig_header, "e280eb411338ec950ac9dc8574c3670cf44d2df79f3e2839e5059b4a7608f820",);
     }
 }

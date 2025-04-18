@@ -164,8 +164,9 @@ big_tuple_struct! {
 impl EventTable {
     pub fn new(db: Arc<Db>) -> Result<Self> {
         let cf = db.get_column_family(ColumnFamilyName::Events.name()).unwrap();
-        let tag_idempotency_index_cf =
-            db.get_column_family(ColumnFamilyName::EventTagIdempotencyKeyIndex.name()).unwrap();
+        let tag_idempotency_index_cf = db
+            .get_column_family(ColumnFamilyName::EventTagIdempotencyKeyIndex.name())
+            .unwrap();
         let tag_stream_index_cf =
             db.get_column_family(ColumnFamilyName::EventTagStreamIndex.name()).unwrap();
         let meta_cf = db.get_column_family(ColumnFamilyName::Meta.name()).unwrap();
@@ -226,10 +227,10 @@ impl EventTable {
         Ok(event)
     }
 
+    // N.B.: We don't *need* the tag to locate the event, but our primary
+    // index is by tag + ID
     pub fn get(&self, tag: Uuid, id: u64) -> Result<Option<Box<Event>>> {
-        // XXX: Is pinning the slice here a performance win? In which cases?
-        let key = packed!(tag.into_bytes(), id.into());
-        Ok(self.accessor().get(&key)?)
+        Ok(self.accessor().get(&packed!(tag.into_bytes(), id.into()))?)
     }
 
     pub fn get_id_by_idempotency_key(
@@ -245,6 +246,7 @@ impl EventTable {
             .map_err(Into::into)
     }
 
+    #[allow(dead_code)]
     pub fn get_by_idempotency_key(
         &self,
         txn: &mut Transaction,
@@ -264,7 +266,7 @@ impl EventTable {
     ) -> impl Iterator<Item = Result<Box<Event>>> + 'a {
         let mut cursor = self.accessor().cursor();
         cursor.seek(&packed!(tag.into_bytes(), starting_id.into()));
-        cursor.prefix::<[u8; 16]>(*tag.as_bytes()).values().map(|x| x.map_err(Into::into))
+        cursor.prefix::<[u8; 16]>(*tag.as_bytes()).values().map(|x| Ok(x?))
     }
 
     pub fn iter_by_stream<'a>(
@@ -278,13 +280,15 @@ impl EventTable {
         let seek_to =
             EventStreamIndexKey::new(tag.as_bytes(), stream.as_bytes(), &starting_id.into());
         cursor.seek(&seek_to);
-        cursor.prefix::<BigTuple>(prefix).keys().map(move |key| {
-            let id = *key?.id();
-            // XXX: These access are monotonic and should be highly coherent.
-            // Is there a way to make them faster?
-            let event = self.get(tag, id.into())?.unwrap();
-            Ok(event)
-        })
+        cursor
+            .prefix::<BigTuple>(prefix)
+            .keys()
+            .map(move |key| {
+                let id = *key?.id();
+                let event = self.get(tag, id.into())?;
+                Ok(event)
+            })
+            .filter_map(Result::transpose)
     }
 }
 

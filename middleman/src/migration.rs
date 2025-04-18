@@ -88,7 +88,6 @@ impl Version {
                 ColumnFamilyName::Deliveries,
                 ColumnFamilyName::DeliveryNextAttemptIndex,
                 ColumnFamilyName::Subscribers,
-                ColumnFamilyName::SubscriberTagIndex,
                 ColumnFamilyName::Events,
                 ColumnFamilyName::EventTagIdempotencyKeyIndex,
                 ColumnFamilyName::EventTagStreamIndex,
@@ -113,8 +112,9 @@ fn read_version(db_dir: &Path) -> Result<Version> {
 fn create_or_open(db_dir: &Path) -> Result<(Version, Db)> {
     let version = read_version(db_dir)?;
 
-    let descriptors =
-        Version::iter_inclusive(Version::V0..=version).flat_map(|v| v.column_families()).cloned();
+    let descriptors = Version::iter_inclusive(Version::V0..=version)
+        .flat_map(|v| v.column_families())
+        .cloned();
 
     let mut options = DbOptions::default();
     options.create_if_missing = true;

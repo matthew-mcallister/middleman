@@ -133,6 +133,12 @@ macro_rules! impl_bytes_as_prefix_of_packed_tuple {
                 self.is_prefix_of(IntoBytes::as_bytes(other))
             }
         }
+
+        impl<T0: HasLayout + IntoBytes, $($T: HasLayout + IntoBytes),*> IsPrefixOf<T0> for $PackedN<$($T),*> {
+            fn is_prefix_of(&self, other: &T0) -> bool {
+                IntoBytes::as_bytes(self).is_prefix_of(IntoBytes::as_bytes(other))
+            }
+        }
     };
 }
 

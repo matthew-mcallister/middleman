@@ -33,13 +33,17 @@ impl DeliveryTask {
     pub(crate) fn new(
         shared: Arc<TaskShared>,
         transaction: Transaction,
+        tag: Uuid,
         subscriber_id: Uuid,
         event_id: u64,
     ) -> Result<Self> {
-        let subscriber = shared.subscribers.get(subscriber_id)?.ok_or(ErrorKind::Unexpected)?;
-        let event = shared.events.get(subscriber.tag(), event_id)?.ok_or(ErrorKind::Unexpected)?;
-        let delivery =
-            shared.deliveries.get(subscriber_id, event_id)?.ok_or(ErrorKind::Unexpected)?;
+        let subscriber =
+            shared.subscribers.get(tag, subscriber_id)?.ok_or(ErrorKind::Unexpected)?;
+        let event = shared.events.get(tag, event_id)?.ok_or(ErrorKind::Unexpected)?;
+        let delivery = shared
+            .deliveries
+            .get(tag, subscriber_id, event_id)?
+            .ok_or(ErrorKind::Unexpected)?;
         Ok(Self {
             shared,
             transaction,
@@ -57,6 +61,7 @@ impl DeliveryTask {
             self.delivery.attempts_made() + 1,
         );
 
+        let tag = self.delivery.tag();
         let subscriber_id = self.delivery.subscriber_id();
         let mut txn = self.transaction;
 
@@ -71,7 +76,7 @@ impl DeliveryTask {
         let timestamp: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
         timestamp_and_sign_request(timestamp.into(), self.subscriber.hmac_key(), &mut request);
 
-        let connection = self.shared.connections.connect(&subscriber_id).await;
+        let connection = self.shared.connections.connect(&(tag, subscriber_id)).await;
         // Mark the task as started whether or not the connection succeeded
         self.shared.stats.tasks_started_last_tick.fetch_add(1, Ordering::Acquire);
 
