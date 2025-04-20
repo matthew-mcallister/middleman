@@ -1,6 +1,6 @@
 // TODO: Support 3xx redirects by caching the redirect and invalidating
 // connections
-use std::collections::VecDeque;
+use std::collections::BinaryHeap;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
@@ -17,19 +17,27 @@ use uuid::Uuid;
 use crate::error::Result;
 
 pub trait Key: Clone + Eq + Hash + Debug + Send + Sync + 'static {}
-pub trait Connection: Debug + Send + Sync + 'static {}
 
 impl Key for Uuid {}
 impl<T1: Key, T2: Key> Key for (T1, T2) {}
+
+pub trait Connection: Debug + Send + Sync + 'static {
+    // The max amount of seconds the server is willing to keep this connection
+    // open. This should be retrieved from the `Keep-Alive` header of the
+    // response when present, otherwise a fallback.
+    fn keep_alive(&self) -> u16;
+}
 
 pub trait ConnectionFactory: Debug + Send + Sync + 'static {
     type Key: Key;
     type Connection: Connection;
 
+    /// Looks up the max number of connections a host supports.
+    fn max_connections(&self, key: &Self::Key) -> Result<u16>;
+
     fn connect<'a>(
         &'a self,
         key: &'a Self::Key,
-        keep_alive_secs: u16,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send + 'a>>;
 }
 
@@ -62,45 +70,67 @@ impl<'pool, K: Key, C: Connection> Drop for ConnectionHandle<'pool, K, C> {
     }
 }
 
+/// Idle connection waiting to be reused. `PartialEq`/`PartialOrd`
+/// implementations compare expiration timestamp only.
 #[derive(Debug)]
 struct IdleConnection<C> {
     idle_since: Instant,
     connection: Box<C>,
 }
 
-#[derive(Debug)]
-struct PerHostPool<C: Connection> {
-    max_connections: u16,
-    /// How long to hold onto idle connections. Should be equal to the
-    /// keepalive header value.
-    idle_timeout: u16,
-    total_connections: u16,
-    idle_connections: VecDeque<IdleConnection<C>>,
-    // XXX: This really shouldn't be behind a lock
-    notify_idle: Arc<Notify>,
+impl<C: Connection> IdleConnection<C> {
+    fn timeout(&self) -> Instant {
+        let timeout = self.connection.keep_alive();
+        self.idle_since.checked_add(Duration::from_secs(timeout as _)).unwrap()
+    }
+
+    /// Idle timeout minus a small buffer so that we can clear idle connections
+    /// on our end before they get cleared on the other host's end.
+    fn timeout_pessimistic(&self) -> Instant {
+        let timeout = self.connection.keep_alive().saturating_sub(2);
+        self.idle_since.checked_add(Duration::from_secs(timeout as _)).unwrap()
+    }
 }
 
-impl<C: Connection> PerHostPool<C> {
-    fn idle_timeout(&self) -> Duration {
-        // We subtract 2 sec since it's better to reap timed out connections
-        // slightly early rather than too late
-        Duration::from_secs(self.idle_timeout as u64 - 2)
+impl<C: Connection> std::cmp::PartialEq for IdleConnection<C> {
+    fn eq(&self, other: &Self) -> bool {
+        &self.timeout() == &other.timeout()
     }
+}
+
+impl<C: Connection> std::cmp::Eq for IdleConnection<C> {}
+
+impl<C: Connection> std::cmp::PartialOrd for IdleConnection<C> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // N.B. we reverse the order here so that we get a min heap instead of
+        // a max heap
+        std::cmp::PartialOrd::partial_cmp(&other.timeout(), &self.timeout())
+    }
+}
+
+impl<C: Connection> std::cmp::Ord for IdleConnection<C> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        std::cmp::Ord::cmp(&other.timeout(), &self.timeout())
+    }
+}
+
+#[derive(Debug)]
+struct PerHostPool<C: Connection> {
+    total_connections: u16,
+    idle_connections: BinaryHeap<IdleConnection<C>>,
+    // XXX: This really shouldn't be behind a lock
+    notify_idle: Arc<Notify>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Http11ConnectionPoolSettings {
     pub(crate) max_connections: u16,
-    pub(crate) max_connections_per_host: u16,
-    pub(crate) idle_timeout_seconds: u16,
 }
 
 impl Default for Http11ConnectionPoolSettings {
     fn default() -> Self {
         Self {
-            max_connections: 256,
-            max_connections_per_host: 16,
-            idle_timeout_seconds: 60,
+            max_connections: 512,
         }
     }
 }
@@ -150,7 +180,7 @@ impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
             connection,
         };
         let mut pool = self.hosts.get_mut(host).unwrap();
-        pool.idle_connections.push_back(connection);
+        pool.idle_connections.push(connection);
         let notify = Arc::clone(&pool.notify_idle);
         drop(pool);
         notify.notify_one();
@@ -181,22 +211,20 @@ impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
     /// Acquires a lease on a connection. If an idle connection was acquired,
     /// it is returned. If a new lease was allocated, then returns `Ok(None)`.
     async fn acquire_lease<'a>(&self, key: &K) -> Result<Option<Box<C>>> {
-        let key = key.clone();
         loop {
             let mut host_pool = self.hosts.entry(key.clone()).or_insert_with(|| PerHostPool {
-                max_connections: self.settings.max_connections_per_host,
-                idle_timeout: self.settings.idle_timeout_seconds,
                 total_connections: 0,
                 idle_connections: Default::default(),
                 notify_idle: Default::default(),
             });
 
             // Try to acquire an idle connection
-            if let Some(idle) = host_pool.idle_connections.pop_front() {
+            if let Some(idle) = host_pool.idle_connections.pop() {
                 return Ok(Some(idle.connection));
             }
 
-            if host_pool.total_connections < host_pool.max_connections {
+            let max_connections = self.connection_factory.max_connections(key)?;
+            if host_pool.total_connections < max_connections {
                 // Try to allocate a new connection
                 if let Some(()) = self.allocate_free() {
                     host_pool.total_connections += 1;
@@ -204,9 +232,7 @@ impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
                 }
             }
 
-            if host_pool.total_connections < host_pool.max_connections
-                && host_pool.total_connections == 0
-            {
+            if host_pool.total_connections < max_connections && host_pool.total_connections == 0 {
                 // Wait for a free slot to become available
                 drop(host_pool);
                 self.notify_free.notified().await;
@@ -224,12 +250,11 @@ impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
     pub async fn connect<'a>(&'a self, key: &K) -> Result<ConnectionHandle<'a, K, C>> {
         let connection = self.acquire_lease(key).await?;
 
-        let keepalive = self.settings.idle_timeout_seconds;
         let connection = if let Some(connection) = connection {
             connection
         } else {
             let g = guard(|| self.push_free()); // Release if the connection fails
-            let connection = self.connection_factory.connect(key, keepalive).await?;
+            let connection = self.connection_factory.connect(key).await?;
             std::mem::forget(g);
             Box::new(connection)
         };
@@ -245,15 +270,12 @@ impl<K: Key, C: Connection> Http11ConnectionPool<K, C> {
     pub fn recycle_idle(&self) {
         for mut host in self.hosts.iter_mut() {
             loop {
-                let Some(ref idle) = host.idle_connections.front() else { break };
-                let elapsed = Instant::now().duration_since(idle.idle_since);
-                if elapsed < host.idle_timeout() {
-                    // Because idle connections are ordered from oldest to
-                    // newest, we can stop iterating early
+                let Some(ref idle) = host.idle_connections.peek() else { break };
+                if Instant::now() < idle.timeout_pessimistic() {
                     break;
                 }
 
-                host.idle_connections.pop_front();
+                host.idle_connections.pop();
                 host.total_connections -= 1;
 
                 // Push to free pool and notify now that lock is released
@@ -323,13 +345,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_max_host_connections() {
-        let pool = Arc::new(Http11ConnectionPool::new(
-            Http11ConnectionPoolSettings {
-                max_connections_per_host: 1,
-                ..Default::default()
-            },
-            Box::new(TestConnectionFactory::default()),
-        ));
+        let factory = TestConnectionFactory {
+            max_connections_per_host: 1,
+            ..Default::default()
+        };
+        let pool = Arc::new(Http11ConnectionPool::new(Default::default(), Box::new(factory)));
 
         // We can allocate one handle for each host
         let host1 = CompactString::from("example.com:1234");

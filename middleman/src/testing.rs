@@ -11,7 +11,6 @@ use http::{Request, Response};
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
 use tracing::info;
-use uuid::Uuid;
 
 use crate::api::auth::Claims;
 use crate::api::consumer::router as consumer_router;
@@ -205,11 +204,22 @@ pub struct TestConnection {
     pub keep_alive_secs: u16,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TestConnectionFactory {
     // Also doubles as total number of connections created
     pub id: AtomicU64,
     pub num_connections: Arc<AtomicU64>,
+    pub max_connections_per_host: u16,
+}
+
+impl Default for TestConnectionFactory {
+    fn default() -> Self {
+        Self {
+            id: Default::default(),
+            num_connections: Default::default(),
+            max_connections_per_host: 16,
+        }
+    }
 }
 
 impl TestConnection {
@@ -225,16 +235,24 @@ impl Drop for TestConnection {
 }
 
 impl Key for CompactString {}
-impl Connection for TestConnection {}
+
+impl Connection for TestConnection {
+    fn keep_alive(&self) -> u16 {
+        30
+    }
+}
 
 impl ConnectionFactory for TestConnectionFactory {
     type Key = CompactString;
     type Connection = TestConnection;
 
+    fn max_connections(&self, key: &Self::Key) -> Result<u16> {
+        Ok(self.max_connections_per_host)
+    }
+
     fn connect<'a>(
         &'a self,
         key: &'a Self::Key,
-        keep_alive_secs: u16,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send + 'a>> {
         let num_connections = Arc::clone(&self.num_connections);
         num_connections.fetch_add(1, Ordering::Relaxed);
@@ -245,7 +263,7 @@ impl ConnectionFactory for TestConnectionFactory {
                 num_connections,
                 id,
                 host,
-                keep_alive_secs,
+                keep_alive_secs: 60,
             })
         })
     }

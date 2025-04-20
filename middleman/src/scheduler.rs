@@ -2,9 +2,8 @@ use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, Entry};
 use middleman_db::Db;
-use tracing::debug;
 use uuid::Uuid;
 
 use crate::delivery::{DeliveryTable, PendingDelivery};
@@ -157,7 +156,7 @@ pub(crate) struct Scheduler {
     events: Arc<EventTable>,
     deliveries: Arc<DeliveryTable>,
     connections: Arc<SubscriberConnectionPool>,
-    unit_schedulers: DashMap<Uuid, UnitScheduler>,
+    unit_schedulers: DashMap<(Uuid, Uuid), UnitScheduler>,
 }
 
 impl Scheduler {
@@ -190,24 +189,26 @@ impl Scheduler {
 
     // Adds a newly created subscriber to the scheduler without scanning.
     pub fn register_subscriber(&self, subscriber: &Subscriber) {
-        let shared = Arc::new(TaskShared {
-            db: Arc::clone(self.subscribers.db()),
-            tag: subscriber.tag(),
-            subscriber_id: subscriber.id(),
-            stats: Default::default(),
-            subscribers: Arc::clone(&self.subscribers),
-            events: Arc::clone(&self.events),
-            deliveries: Arc::clone(&self.deliveries),
-            connections: Arc::clone(&self.connections),
-        });
-        self.unit_schedulers.insert(
-            subscriber.id(),
-            UnitScheduler {
-                shared,
-                tasks_started_history: Default::default(),
+        let key = (subscriber.tag(), subscriber.id());
+        match self.unit_schedulers.entry(key) {
+            Entry::Vacant(entry) => {
+                let shared = Arc::new(TaskShared {
+                    db: Arc::clone(self.subscribers.db()),
+                    tag: subscriber.tag(),
+                    subscriber_id: subscriber.id(),
+                    stats: Default::default(),
+                    subscribers: Arc::clone(&self.subscribers),
+                    events: Arc::clone(&self.events),
+                    deliveries: Arc::clone(&self.deliveries),
+                    connections: Arc::clone(&self.connections),
+                });
+                entry.insert(UnitScheduler {
+                    shared,
+                    tasks_started_history: Default::default(),
+                });
             },
-        );
-        debug!(?subscriber, "registered subscriber {}", subscriber.id());
+            _ => {},
+        }
     }
 
     pub fn schedule_all(&self) -> Result<()> {

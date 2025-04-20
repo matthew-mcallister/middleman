@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::FixedOffset;
 use hmac::{Hmac, Mac};
@@ -21,7 +22,10 @@ use uuid::Uuid;
 
 use crate::connection::{Connection, ConnectionFactory, Http11ConnectionPool};
 use crate::error::{Error, ErrorKind, Result};
-use crate::subscriber::SubscriberTable;
+use crate::subscriber::{Subscriber, SubscriberTable};
+
+// TODO: This should be a config variable
+const MAX_KEEPALIVE_SECS: u16 = 60;
 
 #[derive(Clone, Debug, Default)]
 struct Resolver;
@@ -38,11 +42,31 @@ trait Stream: AsyncRead + AsyncWrite + Debug + Send + Sync + Unpin + 'static {}
 
 impl<T> Stream for T where T: AsyncRead + AsyncWrite + Debug + Send + Sync + Unpin + 'static {}
 
+fn get_keep_alive_timeout_from_response<B>(response: &Response<B>) -> Result<Option<u16>> {
+    let Some(header) = response.headers().get("Keep-Alive") else { return Ok(None) };
+    let s = header.to_str()?;
+    let params = s.split(",");
+    for p in params {
+        let mut parts = p.split("=");
+        let Some(key) = parts.next() else { continue };
+        let Some(value) = parts.next() else { continue };
+        if parts.next() != None {
+            // ambiguous parse
+            Err(ErrorKind::InvalidInput)?
+        };
+        if key.trim() == "timeout" {
+            return Ok(Some(u16::from_str(value.trim())?));
+        }
+    }
+    Ok(None)
+}
+
 #[derive(Debug)]
 pub(crate) struct HttpConnection {
     inner: hyper::client::conn::http1::SendRequest<String>,
+    // XXX: If server doesn't return Keep-Alive, maybe don't pool the
+    // connection?
     keep_alive_secs: u16,
-    // TODO: TCP timeout. Currently we wait infinitely long for a response.
 }
 
 impl HttpConnection {
@@ -50,13 +74,22 @@ impl HttpConnection {
         &mut self,
         mut request: Request<String>,
     ) -> Result<Response<Incoming>> {
-        let keep_alive = HeaderValue::from_str(&self.keep_alive_secs.to_string()).unwrap();
-        request.headers_mut().insert("Keep-Alive", keep_alive);
-        Ok(self.inner.send_request(request).await?)
+        request.headers_mut().insert("Connection", "keep-alive".try_into().unwrap());
+        let timeout = Duration::from_secs(30);
+        let response = tokio::time::timeout(timeout, self.inner.send_request(request)).await??;
+        // XXX: Should we continue to ignore invalid Keep-Alive?
+        if let Ok(Some(keep_alive)) = get_keep_alive_timeout_from_response(&response) {
+            self.keep_alive_secs = std::cmp::min(keep_alive, MAX_KEEPALIVE_SECS);
+        }
+        Ok(response)
     }
 }
 
-impl Connection for HttpConnection {}
+impl Connection for HttpConnection {
+    fn keep_alive(&self) -> u16 {
+        self.keep_alive_secs
+    }
+}
 
 #[derive(Debug)]
 struct RawConnectionFactory {
@@ -69,8 +102,6 @@ struct ConnectionInfo<'a> {
     host: Host<&'a str>,
     port: u16,
     tls: bool,
-    /// Value to set on the HTTP Keep-Alive header. Defaults to 30.
-    keep_alive_secs: u16,
 }
 
 impl<'a> ConnectionInfo<'a> {
@@ -83,12 +114,7 @@ impl<'a> ConnectionInfo<'a> {
         let default_port = if tls { 443 } else { 80 };
         let port = url.port().unwrap_or(default_port);
         let host = url.host().ok_or(ErrorKind::InvalidInput)?;
-        Ok(Self {
-            host,
-            port,
-            tls,
-            keep_alive_secs: 30,
-        })
+        Ok(Self { host, port, tls })
     }
 }
 
@@ -121,7 +147,7 @@ impl RawConnectionFactory {
 
         Ok(HttpConnection {
             inner: send_request,
-            keep_alive_secs: info.keep_alive_secs,
+            keep_alive_secs: 30,
         })
     }
 }
@@ -145,16 +171,23 @@ impl ConnectionFactory for SubscriberConnectionFactory {
     type Key = (Uuid, Uuid);
     type Connection = HttpConnection;
 
+    fn max_connections(&self, key: &Self::Key) -> Result<u16> {
+        Ok(if let Some(subscriber) = self.subscribers.get(key.0, key.1)? {
+            subscriber.max_connections()
+        } else {
+            // TODO: This should be a config variable
+            Subscriber::default_max_connections()
+        })
+    }
+
     fn connect<'a>(
         &'a self,
         key: &'a Self::Key,
-        keep_alive_secs: u16,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Connection>> + Send + 'a>> {
         Box::pin(async move {
-            let subscriber = self.subscribers.get(key.0, key.1)?.ok_or(ErrorKind::InvalidInput)?;
+            let subscriber = self.subscribers.get(key.0, key.1)?.ok_or(ErrorKind::Unexpected)?;
             let url = Url::from_str(subscriber.destination_url()).unwrap();
-            let mut info = ConnectionInfo::from_url(&url).unwrap();
-            info.keep_alive_secs = keep_alive_secs;
+            let info = ConnectionInfo::from_url(&url).unwrap();
             self.raw.connect(info).await
         })
     }
@@ -208,6 +241,7 @@ mod tests {
                 "HTTP/1.1 200 OK\r\n",
                 "Content-Type: text/plain\r\n",
                 "Content-Length: 15\r\n",
+                "Keep-Alive: max=200, timeout=15\r\n",
                 "\r\n",
                 "Hello, world!\r\n"
             );
@@ -221,7 +255,7 @@ mod tests {
                 std::str::from_utf8(&request).unwrap(),
                 concat!(
                     "GET / HTTP/1.1\r\n",
-                    "keep-alive: 30\r\n",
+                    "connection: keep-alive\r\n",
                     "\r\n",
                 ),
             );
@@ -232,7 +266,6 @@ mod tests {
             host: Host::Domain(host),
             port,
             tls: false,
-            keep_alive_secs: 30,
         };
         let mut conn = factory.connect(conn_info).await.unwrap();
         let request = Request::get("/").body(String::new()).unwrap();
@@ -242,6 +275,7 @@ mod tests {
             response.into_body().collect().await.unwrap().to_bytes(),
             &b"Hello, world!\r\n"[..],
         );
+        assert_eq!(conn.keep_alive_secs, 15);
 
         j.await.unwrap();
     }

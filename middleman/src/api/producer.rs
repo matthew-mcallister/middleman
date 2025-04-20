@@ -309,14 +309,14 @@ mod tests {
                 "id": id1,
                 "stream_regex": ".*",
                 "destination_url": "https://example.com/webhook",
-                //"max_connections": 5,
+                "max_connections": 5,
             },
             {
                 "tag": tag,
                 "id": id2,
                 "stream_regex": ".*",
                 "destination_url": "https://example.com/webhook",
-                //"max_connections": 5,
+                "max_connections": 5,
             },
         ]);
         assert_eq!(response, expected);
@@ -348,7 +348,7 @@ mod tests {
             "id": id2,
             "stream_regex": ".*",
             "destination_url": "https://example.com/webhook2",
-            //"max_connections": 5,
+            "max_connections": 5,
         }]);
         assert_eq!(response, expected);
 
@@ -364,14 +364,14 @@ mod tests {
                 "id": id1,
                 "stream_regex": ".*",
                 "destination_url": "https://example.com/webhook",
-                //"max_connections": 5,
+                "max_connections": 5,
             },
             {
                 "tag": tag,
                 "id": id2,
                 "stream_regex": ".*",
                 "destination_url": "https://example.com/webhook2",
-                //"max_connections": 5,
+                "max_connections": 5,
             },
         ]);
         assert_eq!(response, expected);
@@ -417,14 +417,14 @@ mod tests {
                 "id": id1,
                 "stream_regex": ".*",
                 "destination_url": "https://example.com/webhook",
-                //"max_connections": 5,
+                "max_connections": 5,
             },
             {
                 "tag": tag,
                 "id": id2,
                 "stream_regex": ".*",
                 "destination_url": "https://example.com/webhook",
-                //"max_connections": 5,
+                "max_connections": 5,
             },
         ]);
         assert_eq!(response, expected_body);
@@ -438,7 +438,7 @@ mod tests {
             "id": id1,
             "stream_regex": ".*",
             "destination_url": "https://example.com/webhook",
-            //"max_connections": 5,
+            "max_connections": 5,
         }]);
         assert_eq!(response, expected);
 
@@ -451,7 +451,7 @@ mod tests {
             "id": id1,
             "stream_regex": ".*",
             "destination_url": "https://example.com/webhook",
-            //"max_connections": 5,
+            "max_connections": 5,
         }]);
         assert_eq!(response, expected);
 

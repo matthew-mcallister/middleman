@@ -20,6 +20,8 @@ use crate::error::Result;
 struct SubscriberHeader {
     tag: [u8; 16],
     id: [u8; 16],
+    max_connections: u16,
+    _reserved0: u16,
     _reserved: [u64; 2],
 }
 
@@ -43,6 +45,7 @@ impl Serialize for ProducerApiSerializer<Subscriber> {
         s.serialize_field("id", &self.0.id())?;
         s.serialize_field("destination_url", &self.0.destination_url())?;
         s.serialize_field("stream_regex", &self.0.stream_regex())?;
+        s.serialize_field("max_connections", &self.0.max_connections())?;
         s.end()
     }
 }
@@ -56,6 +59,7 @@ impl Serialize for ConsumerApiSerializer<Subscriber> {
         s.serialize_field("id", &self.0.id())?;
         s.serialize_field("destination_url", &self.0.destination_url())?;
         s.serialize_field("stream_regex", &self.0.stream_regex())?;
+        s.serialize_field("max_connections", &self.0.max_connections())?;
         s.end()
     }
 }
@@ -68,6 +72,10 @@ pub(crate) struct SubscriberTable {
 pub(crate) type SubscriberKey = Packed2<[u8; 16], [u8; 16]>;
 
 impl Subscriber {
+    pub fn default_max_connections() -> u16 {
+        16
+    }
+
     pub fn tag(&self) -> Uuid {
         Uuid::from_bytes(self.header().tag)
     }
@@ -82,6 +90,10 @@ impl Subscriber {
 
     pub fn stream_regex(&self) -> &str {
         std::str::from_utf8(self.stream_regex_bytes()).unwrap()
+    }
+
+    pub fn max_connections(&self) -> u16 {
+        self.header().max_connections
     }
 
     pub fn hmac_key(&self) -> &str {
@@ -203,7 +215,6 @@ impl SubscriberBuilder {
     }
 
     pub fn max_connections(&mut self, max_connections: u16) -> &mut Self {
-        // FIXME urgent: Actually handle this field
         self.max_connections = Some(max_connections);
         self
     }
@@ -215,9 +226,12 @@ impl SubscriberBuilder {
         }
         let stream_regex = self.stream_regex.take().ok_or("missing subscriber regex")?;
         let hmac_key = self.hmac_key.take().ok_or("missing subscriber HMAC key")?;
+        let max_connections = self.max_connections.unwrap_or(Subscriber::default_max_connections());
         let header = SubscriberHeader {
             tag: self.tag.ok_or("missing tag")?.into_bytes(),
             id: self.id.expect("missing internal ID").into_bytes(),
+            max_connections,
+            _reserved0: 0,
             _reserved: [0; 2],
         };
         Ok(Subscriber::new(

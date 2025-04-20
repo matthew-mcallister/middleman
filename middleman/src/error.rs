@@ -22,6 +22,7 @@ pub(crate) enum ErrorKind {
     Unauthenticated,
     Forbidden,
     NotFound,
+    Timeout,
     NetworkError,
 }
 
@@ -36,6 +37,7 @@ impl ErrorKind {
             Self::Unauthenticated => 401,
             Self::Forbidden => 403,
             Self::NotFound => 404,
+            Self::Timeout => 408,
             // Not sure if 502 makes the most sense here
             Self::NetworkError => 502,
         })
@@ -52,6 +54,7 @@ impl std::fmt::Display for ErrorKind {
             Self::Unauthenticated => write!(f, "unauthenticated"),
             Self::Forbidden => write!(f, "forbidden"),
             Self::NotFound => write!(f, "not found"),
+            Self::Timeout => write!(f, "timed out"),
             Self::NetworkError => write!(f, "network request failed"),
         }
     }
@@ -114,6 +117,7 @@ define_errors! {
     uuid::Error => ErrorKind::InvalidInput,
     http::header::ToStrError => ErrorKind::InvalidInput,
     jsonwebtoken::errors::Error => ErrorKind::Unauthenticated,
+    tokio::time::error::Elapsed => ErrorKind::Timeout,
 }
 
 impl<'a> From<&'a str> for Box<Error> {

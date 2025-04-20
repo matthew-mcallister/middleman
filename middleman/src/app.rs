@@ -36,11 +36,7 @@ impl Application {
         let deliveries = Arc::new(DeliveryTable::new(Arc::clone(&db))?);
         let subscribers = Arc::new(SubscriberTable::new(Arc::clone(&db))?);
 
-        let settings = Http11ConnectionPoolSettings {
-            max_connections: 512,
-            max_connections_per_host: 16,
-            idle_timeout_seconds: 30,
-        };
+        let settings = Http11ConnectionPoolSettings::default();
         let connection_factory =
             Box::new(SubscriberConnectionFactory::new(Arc::clone(&subscribers))?);
         let connections = Arc::new(SubscriberConnectionPool::new(settings, connection_factory));

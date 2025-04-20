@@ -247,8 +247,7 @@ mod tests {
             "id": subscriber_id,
             "stream_regex": ".*",
             "destination_url": "https://example.com/webhook",
-            // TODO
-            //"max_connections": 6,
+            "max_connections": 6,
         }]);
         assert_eq!(response.unwrap(), expected);
 
@@ -263,7 +262,7 @@ mod tests {
             "id": "481b7576-bced-4d6b-a22a-9ee67f0c63f6",
             "stream_regex": ".*",
             "destination_url": "https://example.com/webhook",
-            //"max_connections": 6,
+            "max_connections": 6,
         }]);
         assert_eq!(response.unwrap(), expected);
 
