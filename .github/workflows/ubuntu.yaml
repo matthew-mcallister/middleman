@@ -19,6 +19,7 @@ jobs:
         sudo apt-get update
         sudo apt-get install build-essential pkg-config libclang-19-dev libssl-dev
         rustup update stable
+        cargo install cargo-deb
     - name: Build
       run: cargo deb --verbose
     - name: Upload
