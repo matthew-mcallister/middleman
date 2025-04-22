@@ -65,3 +65,17 @@ features = ["full", "test-util", "tracing"]
 [dev-dependencies.axum]
 version = "0.8.1"
 features = ["macros"]
+
+[package.metadata.deb]
+maintainer = "Matthew McAllister <matthew.mcallister.0@gmail.com>"
+copyright = "2025, Matthew McAllister <matthew.mcallister.0@gmail.com>"
+license-file = ["../LICENSE", "2"]
+extended-description = """Event distribution system. \
+Middleman is a service that facilitates delivering event data from \
+producers to downstream consumers over the Internet."""
+depends = "$auto"
+section = "database"
+priority = "optional"
+assets = [
+    ["target/release/middlemand", "usr/bin/", "755"],
+]
