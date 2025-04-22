@@ -16,8 +16,9 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install deps
       run: |
-        apt-get update
-        apt-get install build-essential pkg-config libclang-19-dev libssl-dev
+        sudo apt-get update
+        sudo apt-get install build-essential pkg-config libclang-19-dev libssl-dev
+        rustup update stable
     - name: Build
       run: cargo deb --verbose
     - name: Upload
