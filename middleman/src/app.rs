@@ -28,7 +28,7 @@ pub struct Application {
 
 impl Application {
     pub fn new(config: Box<Config>) -> Result<Self> {
-        let mut migrator = Migrator::new(&config.db_dir)?;
+        let mut migrator = Migrator::new(&config.db_dir())?;
         migrator.migrate()?;
         let db = Arc::new(migrator.unwrap());
 
@@ -194,7 +194,7 @@ mod tests {
         let descs: [(&str, &rocksdb::Options, rocksdb::ColumnFamilyTtl); 0] = [];
         let mut options = DbOptions::default();
         options.create_if_missing = true;
-        let mut db = middleman_db::Db::open(harness.db_dir(), &options, descs).unwrap();
+        let mut db = middleman_db::Db::open(&harness.config().db_dir(), &options, descs).unwrap();
         db.create_column_family(&("cf", &Default::default(), Default::default()))
             .unwrap();
         let db = Arc::new(db);

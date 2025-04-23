@@ -234,7 +234,6 @@ mod tests {
         let host = "127.0.0.1";
         let listener = tokio::net::TcpListener::bind((host, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        println!("{:?}", port);
 
         let j = tokio::spawn(async move {
             let response = concat!(

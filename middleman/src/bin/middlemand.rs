@@ -1,10 +1,22 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use middleman::error::Result;
+use clap::Parser;
+use tracing::{error, info, warn};
+
+use middleman::error::{Error, Result};
 use middleman::ingestion::sql::SqlIngestor;
 use middleman::util::sleep_until_next_tick;
 use middleman::{init_logging, Application};
-use tracing::{error, info};
+
+/// Middleman event distribution daemon.
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Path to a config file to load.
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,9 +26,9 @@ async fn main() -> Result<()> {
 
     init_logging();
 
-    let config = middleman::config::load_config()?;
+    let args = Args::parse();
+    let config = middleman::config::load_config(args.config)?;
     let app = Arc::new(Application::new(config.clone())?);
-    let router = middleman::api::producer::router(Arc::clone(&app));
 
     let ref_time = tokio::time::Instant::now();
     let period = 0.2;
@@ -25,7 +37,6 @@ async fn main() -> Result<()> {
         let app = Arc::clone(&app);
         async move {
             loop {
-                // TODO maybe? Catch panics. Would require testing.
                 let res = app.schedule_deliveries();
                 if let Err(e) = res {
                     error!("error scheduling deliveries: {}", e);
@@ -48,9 +59,24 @@ async fn main() -> Result<()> {
         });
     }
 
-    let listener = tokio::net::TcpListener::bind((config.host, config.port)).await?;
-    info!("Listening on {}:{}", config.host, config.port);
-    axum::serve(listener, router).await?;
+    if let Some(options) = config.consumer_api_options() {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            let router = middleman::api::consumer::router(app)?;
+            let listener = tokio::net::TcpListener::bind((options.host, options.port)).await?;
+            info!("consumer API listening on {}:{}", options.host, options.port);
+            axum::serve(listener, router).await?;
+            Ok::<_, Box<Error>>(())
+        });
+    } else {
+        warn!("consumer API not configured");
+    }
+
+    let router = middleman::api::producer::router(Arc::clone(&app));
+    let producer_listener =
+        tokio::net::TcpListener::bind((config.producer_api_host, config.producer_api_port)).await?;
+    info!("producer API listening on {}:{}", config.producer_api_host, config.producer_api_port);
+    axum::serve(producer_listener, router).await?;
 
     Ok(())
 }

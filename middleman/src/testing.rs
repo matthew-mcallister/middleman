@@ -24,7 +24,7 @@ use crate::Application;
 #[derive(Default)]
 pub(crate) struct TestHarness {
     pub(crate) config: Option<Box<Config>>,
-    pub(crate) db_dir: Option<tempfile::TempDir>,
+    pub(crate) data_dir: Option<tempfile::TempDir>,
     pub(crate) application: Option<Arc<Application>>,
     pub(crate) connection_pool: Option<Http11ConnectionPool<CompactString, TestConnection>>,
     pub(crate) sqlite_db_url: Option<String>,
@@ -41,9 +41,9 @@ impl TestHarness {
         Default::default()
     }
 
-    pub fn db_dir(&mut self) -> &std::path::Path {
-        if self.db_dir.is_some() {
-            return self.db_dir.as_ref().map(|d| d.path()).unwrap();
+    pub fn data_dir(&mut self) -> &std::path::Path {
+        if self.data_dir.is_some() {
+            return self.data_dir.as_ref().map(|d| d.path()).unwrap();
         }
 
         // Create temp dir
@@ -55,8 +55,8 @@ impl TestHarness {
             _ => panic!(),
         }
 
-        self.db_dir = Some(tempfile::tempdir_in(&root).unwrap());
-        self.db_dir.as_ref().map(|d| d.path()).unwrap()
+        self.data_dir = Some(tempfile::tempdir_in(&root).unwrap());
+        self.data_dir.as_ref().map(|d| d.path()).unwrap()
     }
 
     pub fn config(&mut self) -> &mut Box<Config> {
@@ -64,15 +64,17 @@ impl TestHarness {
             return self.config.as_mut().unwrap();
         }
 
-        let db_dir = self.db_dir().to_owned();
+        let data_dir = self.data_dir().to_owned();
         let config = Box::new(Config {
-            db_dir,
-            host: IpAddr::from_str("127.0.0.1").unwrap(),
-            port: 10707,
+            data_dir: data_dir,
+            producer_api_host: IpAddr::from_str("127.0.0.1").unwrap(),
+            producer_api_port: 10707,
+            producer_api_bearer_token: None,
+            consumer_api_host: Some(IpAddr::from_str("127.0.0.1").unwrap()),
+            consumer_api_port: Some(10708),
+            consumer_auth_secret: Some(CONSUMER_AUTH_SECRET.to_owned()),
             ingestion_db_url: None,
             ingestion_db_table: None,
-            producer_api_bearer_token: None,
-            consumer_auth_secret: Some(CONSUMER_AUTH_SECRET.to_owned()),
         });
         self.config = Some(config);
         self.config.as_mut().unwrap()
@@ -105,8 +107,8 @@ impl TestHarness {
             return self.sqlite_db_url.as_ref().unwrap();
         }
 
-        let db_dir = self.db_dir();
-        let path = db_dir.join("test.sqlite").to_str().unwrap().to_owned();
+        let data_dir = self.data_dir();
+        let path = data_dir.join("test.sqlite").to_str().unwrap().to_owned();
         let url = format!("sqlite://{path}");
         self.sqlite_db_url = Some(url);
         self.sqlite_db_url.as_ref().unwrap()

@@ -118,6 +118,11 @@ define_errors! {
     http::header::ToStrError => ErrorKind::InvalidInput,
     jsonwebtoken::errors::Error => ErrorKind::Unauthenticated,
     tokio::time::error::Elapsed => ErrorKind::Timeout,
+    toml::de::Error => ErrorKind::InvalidInput,
+}
+
+define_errors! {
+    std::convert::Infallible => unreachable!(),
 }
 
 impl<'a> From<&'a str> for Box<Error> {
