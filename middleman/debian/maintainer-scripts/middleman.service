@@ -1,0 +1,10 @@
+[Unit]
+Description="middleman daemon"
+
+[Service]
+ExecStart=/usr/bin/middlemand --config /etc/middleman/middlemand.toml
+Restart=true
+User=middleman
+
+[Install]
+WantedBy=multi-user.target

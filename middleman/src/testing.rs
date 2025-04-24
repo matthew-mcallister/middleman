@@ -68,10 +68,10 @@ impl TestHarness {
         let config = Box::new(Config {
             data_dir: data_dir,
             producer_api_host: IpAddr::from_str("127.0.0.1").unwrap(),
-            producer_api_port: 10707,
+            producer_api_port: 8081,
             producer_api_bearer_token: None,
             consumer_api_host: Some(IpAddr::from_str("127.0.0.1").unwrap()),
-            consumer_api_port: Some(10708),
+            consumer_api_port: Some(8080),
             consumer_auth_secret: Some(CONSUMER_AUTH_SECRET.to_owned()),
             ingestion_db_url: None,
             ingestion_db_table: None,
@@ -248,7 +248,7 @@ impl ConnectionFactory for TestConnectionFactory {
     type Key = CompactString;
     type Connection = TestConnection;
 
-    fn max_connections(&self, key: &Self::Key) -> Result<u16> {
+    fn max_connections(&self, _key: &Self::Key) -> Result<u16> {
         Ok(self.max_connections_per_host)
     }
 

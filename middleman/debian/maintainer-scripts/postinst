@@ -1,0 +1,10 @@
+#!/bin/sh
+
+#DEBHELPER#
+
+if [ "$1" = "configure" ]; then
+    set -e; adduser --system middleman --group; set e
+    mkdir -p /var/lib/middleman
+    chown -R middleman:middleman /var/lib/middleman
+    chmod 700 /var/lib/middleman
+fi

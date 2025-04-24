@@ -77,6 +77,9 @@ producers to downstream consumers over the Internet."""
 depends = "$auto"
 section = "database"
 priority = "optional"
+maintainer-scripts = "debian/maintainer-scripts"
 assets = [
     ["target/release/middlemand", "usr/bin/", "755"],
+    ["debian/assets/middlemand.toml", "etc/middleman/middlemand.toml", "644"],
 ]
+systemd-units = {}

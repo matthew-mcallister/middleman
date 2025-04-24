@@ -1,7 +1,3 @@
-// XXX: Probably need to support alternative fs layouts at some point
-
-use std::fs::File;
-use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -10,8 +6,6 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::error::{Error, ErrorKind, Result};
-
-const DEFAULT_CONFIG_PATH: &'static str = "/etc/middleman/middlemand.toml";
 
 macro_rules! partial_config {
     ($($field:ident: $Field:ty),*$(,)?) => {
@@ -162,16 +156,14 @@ fn load_from_env() -> Result<PartialConfig> {
 }
 
 fn load_from_file(path: &Path) -> Result<PartialConfig> {
-    let mut file = match File::open(path) {
-        Ok(f) => f,
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             warn!(?path, "config file not found");
             return Ok(Default::default());
         },
         Err(e) => Err(e)?,
     };
-    let mut content = String::new();
-    file.read_to_string(&mut content)?;
     Ok(toml::from_str(&content)?)
 }
 
@@ -179,7 +171,8 @@ pub fn load_config(mut path: Option<PathBuf>) -> Result<Box<Config>> {
     if path.is_none() {
         path = get_var("MIDDLEMAN_CONFIG_PATH")?;
     }
-    let path = path.unwrap_or(DEFAULT_CONFIG_PATH.to_owned().into());
+    let path =
+        path.ok_or(Error::with_cause(ErrorKind::InvalidInput, "missing config path".to_owned()))?;
     let config = load_from_file(Path::new(&path))?;
     let config = config.union(load_from_env()?);
     Ok(Box::new(Config::try_from(config)?))

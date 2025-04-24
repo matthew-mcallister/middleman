@@ -1,0 +1,27 @@
+# middlemand configuration file
+
+# All configuration values here can also be set via environment variable using
+# the MIDDLEMAN_*. prefix. E.g., to modify producer_api_bearer_token, set
+# MIDDLEMAN_PRODUCER_API_BEARER_TOKEN. This is a good alternative if you don't
+# want to store secrets in a plaintext config file. If you do store secrets in
+# this config file, consider changing the file permissions to 0600.
+
+# Modify to override where state will be persisted to.
+data_dir = "/var/lib/middleman"
+
+# Modify to override the interface/port that the producer API will listen on
+producer_api_host = "127.0.0.1"
+producer_api_port = 8081
+
+# Uncomment to enable authentication for the producer API.
+#producer_api_bearer_token = "examplesecret"
+
+# Uncomment these three lines to enable the consumer API. The auth secret will
+# have to be the same used to sign the JSON web tokens you issue.
+#consumer_api_host = "127.0.0.1"
+#consumer_api_port = 8080
+#consumer_auth_secret = "examplesecret"
+
+# Uncomment these two lines two enable event ingestion via SQL.
+#ingestion_db_url = "postgresql://user:password@my-db.example.com/db_name"
+#ingestion_db_table = "events"
