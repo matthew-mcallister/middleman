@@ -20,6 +20,8 @@ use crate::error::Result;
 struct SubscriberHeader {
     tag: [u8; 16],
     id: [u8; 16],
+    // TODO: This needs a bit of rethinking in the case that two different
+    // subscribers point to the same host
     max_connections: u16,
     _reserved0: u16,
     _reserved: [u64; 2],
@@ -30,6 +32,7 @@ big_tuple_struct! {
     pub struct Subscriber {
         header[0]: SubscriberHeader,
         pub destination_url_bytes[1]: [u8],
+        // TODO: Definitely should not support full regex here
         pub stream_regex_bytes[2]: [u8],
         pub hmac_key_bytes[3]: [u8],
     }

@@ -1,0 +1,210 @@
+swagger: "2.0"
+info:
+  title: Middleman producer API
+  version: "0.1.0"
+paths:
+  /events:
+    get:
+      summary: Query events
+      description: Queries events that are available to consumers
+      parameters:
+        - name: tag
+          in: query
+          type: string
+          format: uuid
+          required: false
+          description: Limit results by tag
+        - name: starting_id
+          in: query
+          type: integer
+          format: int64
+          minimum: 0
+          required: false
+          description: |
+            Query events with an ID greater than or equal to the given integer.
+            Event IDs are unique within each stream.
+        - name: stream
+          in: query
+          type: string
+          format: uuid
+          required: false
+          description: |
+            Limit results by stream
+        - name: max_results
+          in: query
+          type: integer
+          minimum: 0
+          maximum: 1000
+          default: 100
+          required: false
+          description: Limit the number of results fetched
+      responses:
+        200:
+          schema:
+            type: array
+            items:
+              $ref: '#/definitions/event'
+    post:
+      summary: Create event
+      description: Creates a new event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tag, idempotency_key, stream, payload]
+              properties:
+                tag:
+                  type: string
+                  format: uuid
+                  description: Tag where the event will be namespaced in
+                idempotency_key:
+                  type: string
+                  format: uuid
+                  description: Idempotency key to deduplicate events
+                stream:
+                  type: string
+                  description: |
+                    Arbitrary stream for subscribers to filter on
+                payload:
+                  description: Arbitrary JSON payload
+      responses:
+        200:
+          schema:
+            $ref: '#/definitions/event'
+  /subscribers:
+    get:
+      summary: Query subscribers
+      description: Queries subscribers
+      parameters:
+        - name: tag
+          in: query
+          type: string
+          format: uuid
+          required: false
+          description: Limit subscribers by tag
+        - name: id
+          in: query
+          type: string
+          format: uuid
+          required: false
+          description: |
+            Exact subscriber ID. If present, `tag` must be present as well.
+      responses:
+        200:
+          schema:
+            $ref: '#/definitions/subscriber'
+    put:
+      summary: Create or update subscriber
+      description: Creates a new subscriber or updates an existing subscriber
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tag, id, destination_url, stream_regex, hmac_key]
+              properties:
+                tag:
+                  type: string
+                  format: uuid
+                  description: |
+                    Tag of events that may be sent to this subscriber
+                id:
+                  type: string
+                  format: uuid
+                  description: |
+                    ID of subscriber. Must be unique within the given tag.
+                destination_url:
+                  type: string
+                  format: url
+                  description: |
+                    URL where events will be delivered via HTTPS.
+                stream_regex:
+                  type: string
+                  format: regex
+                  description: |
+                    Regex of streams to subscribe to. Any event whose stream
+                    field matches the regex will be delivered to this
+                    subscriber.
+                max_connections:
+                  type: integer
+                  minimum: 1
+                  description: |
+                    The maximum number of simultaneous connections that will be
+                    opened to this subscriber. Connections are keyed on the
+                    subscriber ID, not the domain name.
+                hmac_key:
+                  type: string
+                  description: |
+                    Arbitrary HMAC key used to sign requests sent to this
+                    subscriber.
+      responses:
+        200:
+          schema:
+            $ref: '#/definitions/event'
+definitions:
+  event:
+    type: object
+    required: [id, idempotency_key, tag, stream, payload]
+    properties:
+      id:
+        type: integer
+        format: int64
+        description: Position of this event within the stream
+      idempotency_key:
+        type: string
+        format: uuid
+        description: Producer-supplied unique identifier for this event
+      tag:
+        type: string
+        format: uuid
+        description: Tag which this event is namespaced in
+      stream:
+        type: string
+        description: Stream which this event belongs to
+      payload:
+        type: string
+        format: json
+        description: JSON payload that will be delivered to consumers
+  subscriber:
+    type: object
+    required: [tag, id, destination_url, stream_regex, max_connections]
+    properties:
+      tag:
+        type: string
+        format: uuid
+        description: |
+          Tag of events that may be sent to this subscriber
+      id:
+        type: string
+        format: uuid
+        description: |
+          ID of subscriber. Must be unique within the given tag.
+      destination_url:
+        type: string
+        format: url
+        description: |
+          URL where events will be delivered via HTTPS.
+      stream_regex:
+        type: string
+        format: regex
+        description: |
+          Regex of streams to subscribe to. Any event whose stream field
+          matches the regex will be delivered to this subscriber.
+      max_connections:
+        type: integer
+        minimum: 1
+        description: |
+          The maximum number of simultaneous connections that will be opened to
+          this subscriber. Connections are keyed on the subscriber ID, not the
+          domain name.
+  error:
+    type: object
+    properties:
+      message:
+        type: string
+        description: Human-readable description of the error that occurred
+  Evidence:
+    type: object

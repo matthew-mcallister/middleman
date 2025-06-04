@@ -135,7 +135,7 @@ pub fn router(app: Arc<Application>) -> Router {
             .get({
                 let app = Arc::clone(&app);
                 async move |query: Query<ListEvents>| -> Result<_> {
-                    let max_results = query.max_results.unwrap_or(100).max(100);
+                    let max_results = query.max_results.unwrap_or(1000).max(100);
                     let starting_id = query.starting_id.unwrap_or(0);
                     let events: Result<Vec<_>> = if let Some(stream) = query.stream.as_ref() {
                         app.events
