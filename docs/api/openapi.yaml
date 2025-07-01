@@ -144,6 +144,25 @@ paths:
         200:
           schema:
             $ref: '#/definitions/event'
+    delete:
+      summary: Delete subscriber
+      description: Deletes a subscriber by tag and id
+      parameters:
+        - name: tag
+          in: query
+          type: string
+          format: uuid
+          required: true
+          description: Tag of the subscriber to delete
+        - name: id
+          in: query
+          type: string
+          format: uuid
+          required: true
+          description: ID of the subscriber to delete
+      responses:
+        200:
+          description: Subscriber deleted successfully
 definitions:
   event:
     type: object
